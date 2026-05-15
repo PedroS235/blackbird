@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: blackbird
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: blackbird
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: blackbird.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blackbird-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename artifacts
+        run: |
+          mv artifacts/blackbird-x86_64-unknown-linux-gnu/blackbird   artifacts/blackbird-linux-x86_64
+          mv artifacts/blackbird-x86_64-apple-darwin/blackbird         artifacts/blackbird-macos-x86_64
+          mv artifacts/blackbird-x86_64-pc-windows-msvc/blackbird.exe  artifacts/blackbird-windows-x86_64.exe
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/blackbird-linux-x86_64
+            artifacts/blackbird-macos-x86_64
+            artifacts/blackbird-windows-x86_64.exe
