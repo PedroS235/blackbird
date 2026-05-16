@@ -115,20 +115,27 @@ impl TimeseriesPanel {
         }
 
         if has_motors {
-            let r = self.make_plot(("motors", t0), plot_h, link_id).show(ui, |p| {
-                let (vmin, vmax) = view_range(p.plot_bounds(), &data.time_us, t0);
-                p.set_auto_bounds(egui::Vec2b::new(false, true));
-                let cursor_x = p.pointer_coordinate().map(|c| c.x);
-                self.add_motor_lines(p, data, t0, vmin, vmax);
-                cursor_x
-            });
+            let r = self
+                .make_plot(("motors", t0), plot_h, link_id)
+                .show(ui, |p| {
+                    let (vmin, vmax) = view_range(p.plot_bounds(), &data.time_us, t0);
+                    p.set_auto_bounds(egui::Vec2b::new(false, true));
+                    let cursor_x = p.pointer_coordinate().map(|c| c.x);
+                    self.add_motor_lines(p, data, t0, vmin, vmax);
+                    cursor_x
+                });
             if let Some(x) = r.inner {
                 plot_state.cursor_time = Some(x);
             }
         }
     }
 
-    fn make_plot(&self, id: impl std::hash::Hash, height: f32, link_id: egui::Id) -> egui_plot::Plot<'_> {
+    fn make_plot(
+        &self,
+        id: impl std::hash::Hash,
+        height: f32,
+        link_id: egui::Id,
+    ) -> egui_plot::Plot<'_> {
         egui_plot::Plot::new(id)
             .height(height)
             .link_axis(link_id, egui::Vec2b::new(true, false))
@@ -148,24 +155,60 @@ impl TimeseriesPanel {
         vmax: f64,
     ) {
         let axes = [
-            (self.show_roll,  "roll",  ROLL,  &data.gyro_unfilt_roll,  &data.gyro_adc_roll),
-            (self.show_pitch, "pitch", PITCH, &data.gyro_unfilt_pitch, &data.gyro_adc_pitch),
-            (self.show_yaw,   "yaw",   YAW,   &data.gyro_unfilt_yaw,   &data.gyro_adc_yaw),
+            (
+                self.show_roll,
+                "roll",
+                ROLL,
+                &data.gyro_unfilt_roll,
+                &data.gyro_adc_roll,
+            ),
+            (
+                self.show_pitch,
+                "pitch",
+                PITCH,
+                &data.gyro_unfilt_pitch,
+                &data.gyro_adc_pitch,
+            ),
+            (
+                self.show_yaw,
+                "yaw",
+                YAW,
+                &data.gyro_unfilt_yaw,
+                &data.gyro_adc_yaw,
+            ),
         ];
         for (show, name, color, unfilt, adc) in axes {
-            if !show { continue; }
-            if self.show_gyro_unfilt {
-                if let Some(v) = unfilt {
-                    p.line(
-                        self.make_line(format!("{name} pre"), &data.time_us, v, t0, vmin, vmax, color)
-                            .style(LineStyle::dashed_dense()),
-                    );
-                }
+            if !show {
+                continue;
             }
-            if self.show_gyro_adc {
-                if let Some(v) = adc {
-                    p.line(self.make_line(format!("{name} post"), &data.time_us, v, t0, vmin, vmax, color));
-                }
+            if self.show_gyro_unfilt
+                && let Some(v) = unfilt
+            {
+                p.line(
+                    self.make_line(
+                        format!("{name} pre"),
+                        &data.time_us,
+                        v,
+                        t0,
+                        vmin,
+                        vmax,
+                        color,
+                    )
+                    .style(LineStyle::dashed_dense()),
+                );
+            }
+            if self.show_gyro_adc
+                && let Some(v) = adc
+            {
+                p.line(self.make_line(
+                    format!("{name} post"),
+                    &data.time_us,
+                    v,
+                    t0,
+                    vmin,
+                    vmax,
+                    color,
+                ));
             }
         }
     }
@@ -179,24 +222,60 @@ impl TimeseriesPanel {
         vmax: f64,
     ) {
         let axes = [
-            (self.show_roll,  "roll",  ROLL,  &data.setpoint_roll,  &data.rc_command_roll),
-            (self.show_pitch, "pitch", PITCH, &data.setpoint_pitch, &data.rc_command_pitch),
-            (self.show_yaw,   "yaw",   YAW,   &data.setpoint_yaw,   &data.rc_command_yaw),
+            (
+                self.show_roll,
+                "roll",
+                ROLL,
+                &data.setpoint_roll,
+                &data.rc_command_roll,
+            ),
+            (
+                self.show_pitch,
+                "pitch",
+                PITCH,
+                &data.setpoint_pitch,
+                &data.rc_command_pitch,
+            ),
+            (
+                self.show_yaw,
+                "yaw",
+                YAW,
+                &data.setpoint_yaw,
+                &data.rc_command_yaw,
+            ),
         ];
         for (show, name, color, setpt, cmd) in axes {
-            if !show { continue; }
-            if self.show_setpoint {
-                if let Some(v) = setpt {
-                    p.line(self.make_line(format!("{name} setpoint"), &data.time_us, v, t0, vmin, vmax, color));
-                }
+            if !show {
+                continue;
             }
-            if self.show_rc_command {
-                if let Some(v) = cmd {
-                    p.line(
-                        self.make_line(format!("{name} cmd"), &data.time_us, v, t0, vmin, vmax, color)
-                            .style(LineStyle::dashed_dense()),
-                    );
-                }
+            if self.show_setpoint
+                && let Some(v) = setpt
+            {
+                p.line(self.make_line(
+                    format!("{name} setpoint"),
+                    &data.time_us,
+                    v,
+                    t0,
+                    vmin,
+                    vmax,
+                    color,
+                ));
+            }
+            if self.show_rc_command
+                && let Some(v) = cmd
+            {
+                p.line(
+                    self.make_line(
+                        format!("{name} cmd"),
+                        &data.time_us,
+                        v,
+                        t0,
+                        vmin,
+                        vmax,
+                        color,
+                    )
+                    .style(LineStyle::dashed_dense()),
+                );
             }
         }
     }
@@ -211,10 +290,19 @@ impl TimeseriesPanel {
     ) {
         for (i, vals) in data.motor.iter().enumerate() {
             let color = MOTOR_COLORS.get(i).copied().unwrap_or(Color32::WHITE);
-            p.line(self.make_line(format!("M{}", i + 1), &data.time_us, vals, t0, vmin, vmax, color));
+            p.line(self.make_line(
+                format!("M{}", i + 1),
+                &data.time_us,
+                vals,
+                t0,
+                vmin,
+                vmax,
+                color,
+            ));
         }
     }
 
+    // TODO: Create a type for the arguments
     fn make_line(
         &self,
         name: impl Into<String>,
@@ -257,8 +345,12 @@ fn view_points(
     let margin_us = (span * 0.5 * 1_000_000.0) as u64;
 
     // Convert normalized view bounds back to raw µs for binary search
-    let lo = t0.saturating_add((vmin * 1_000_000.0) as u64).saturating_sub(margin_us);
-    let hi = t0.saturating_add((vmax * 1_000_000.0) as u64).saturating_add(margin_us);
+    let lo = t0
+        .saturating_add((vmin * 1_000_000.0) as u64)
+        .saturating_sub(margin_us);
+    let hi = t0
+        .saturating_add((vmax * 1_000_000.0) as u64)
+        .saturating_add(margin_us);
 
     let start = time_us.partition_point(|&t| t < lo);
     let end = time_us.partition_point(|&t| t <= hi);
@@ -306,8 +398,14 @@ fn minmax_downsample(time_us: &[u64], vals: &[f32], t0: u64, max_pts: usize) -> 
         for j in (i + 1)..end {
             let v = vals[j];
             let t = time_us[j];
-            if v < min_v { min_v = v; min_t = t; }
-            if v > max_v { max_v = v; max_t = t; }
+            if v < min_v {
+                min_v = v;
+                min_t = t;
+            }
+            if v > max_v {
+                max_v = v;
+                max_t = t;
+            }
         }
 
         if min_t <= max_t {

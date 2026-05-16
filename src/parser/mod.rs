@@ -30,7 +30,7 @@ pub fn log_count(bytes: &[u8]) -> usize {
     blackbox_log::File::new(bytes).log_count()
 }
 
-pub fn parse(bytes: &[u8], log_index: usize) -> Result<ParsedLog, ParseError> {
+pub fn parse(bytes: &[u8], log_index: usize, on_progress: impl Fn(usize)) -> Result<ParsedLog, ParseError> {
     let file = blackbox_log::File::new(bytes);
     let count = file.log_count();
 
@@ -61,7 +61,7 @@ pub fn parse(bytes: &[u8], log_index: usize) -> Result<ParsedLog, ParseError> {
         .map(|f| f.name.to_owned())
         .collect();
 
-    let data = build_flight_data(&mut parser, &field_names);
+    let data = build_flight_data(&mut parser, &field_names, &on_progress);
 
     Ok(ParsedLog {
         header,
@@ -87,14 +87,42 @@ fn build_header(headers: &blackbox_log::Headers<'_>) -> HeaderData {
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|&t| t > 0.0)
         .map(|looptime_us| 1_000_000.0 / looptime_us);
+    let rpm_filter = parse_rpm_filter(&raw_headers);
 
     HeaderData {
         craft_name,
         firmware,
         board,
         sample_rate_hz,
+        rpm_filter,
         raw_headers,
     }
+}
+
+fn parse_rpm_filter(h: &std::collections::HashMap<String, String>) -> Option<header::RpmFilterConfig> {
+    let harmonics = h.get("rpm_filter_harmonics")?.trim().parse::<u32>().ok()?;
+    if harmonics == 0 {
+        return None;
+    }
+    let min_hz = h.get("rpm_filter_min_hz")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(150.0);
+    let fade_range_hz = h.get("rpm_filter_fade_range_hz")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(50.0);
+    let q = h.get("rpm_filter_q")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map(|q100| q100 / 100.0)
+        .unwrap_or(5.0);
+    let weights = h.get("rpm_filter_weights")
+        .map(|v| {
+            v.split(',')
+                .filter_map(|s| s.trim().parse::<f32>().ok())
+                .map(|w| w / 100.0)
+                .collect()
+        })
+        .unwrap_or_else(|| vec![1.0; harmonics as usize]);
+    Some(header::RpmFilterConfig { harmonics, min_hz, fade_range_hz, q, weights })
 }
 
 /// Strips `[N]` from field names, returning `(base, axis_index)`.
@@ -161,6 +189,7 @@ fn build_field_indices(field_names: &[String]) -> FieldIndices {
 fn build_flight_data(
     parser: &mut blackbox_log::DataParser<'_, '_>,
     field_names: &[String],
+    on_progress: &impl Fn(usize),
 ) -> FlightData {
     let idx = build_field_indices(field_names);
     let motor_count = idx.motor.len();
@@ -205,10 +234,16 @@ fn build_flight_data(
         rc_command_throttle
     );
 
+    let mut frame_count = 0usize;
     while let Some(event) = parser.next() {
         let ParserEvent::Main(frame) = event else {
             continue;
         };
+
+        frame_count += 1;
+        if frame_count % 5_000 == 0 {
+            on_progress(frame_count);
+        }
 
         data.time_us.push(frame.time_raw());
         let vals: Vec<f32> = frame.iter().map(main_value_to_f32).collect();
