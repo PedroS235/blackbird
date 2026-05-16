@@ -4,7 +4,7 @@ use egui_plot::{Line, LineStyle, PlotBounds, PlotPoints};
 use crate::app::PlotState;
 use crate::parser::FlightData;
 
-const MAX_DISPLAY_PTS: usize = 10_000;
+const MAX_DISPLAY_PTS: usize = 1_000;
 const SMOOTH_WINDOW: usize = 5;
 
 const ROLL: Color32 = Color32::from_rgb(220, 80, 80);
@@ -90,7 +90,6 @@ impl TimeseriesPanel {
         if has_gyro {
             let r = self.make_plot(("gyro", t0), plot_h, link_id).show(ui, |p| {
                 let (vmin, vmax) = view_range(p.plot_bounds(), &data.time_us, t0);
-                // Re-fit Y to visible data every frame; user controls X only
                 p.set_auto_bounds(egui::Vec2b::new(false, true));
                 let cursor_x = p.pointer_coordinate().map(|c| c.x);
                 self.add_gyro_lines(p, data, t0, vmin, vmax);
@@ -140,7 +139,6 @@ impl TimeseriesPanel {
             .height(height)
             .link_axis(link_id, egui::Vec2b::new(true, false))
             .link_cursor(link_id, egui::Vec2b::new(true, false))
-            // Only allow dragging on X; Y is auto-fitted to visible data
             .allow_drag(egui::Vec2b::new(true, false))
             .x_axis_label("time (s)")
             .legend(egui_plot::Legend::default())
@@ -424,7 +422,7 @@ fn minmax_downsample(time_us: &[u64], vals: &[f32], t0: u64, max_pts: usize) -> 
 
 /// Centered moving average over the y-values. Smooths the display line
 /// without affecting x positions, using a symmetric window clamped at edges.
-fn moving_average(pts: &mut Vec<[f64; 2]>, window: usize) {
+pub(crate) fn moving_average(pts: &mut Vec<[f64; 2]>, window: usize) {
     if window <= 1 || pts.len() < window {
         return;
     }

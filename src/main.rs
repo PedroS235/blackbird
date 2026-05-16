@@ -1,3 +1,4 @@
+mod analysis;
 mod app;
 mod parser;
 mod ui;
@@ -16,6 +17,12 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_icon(icon),
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            // AutoNoVsync avoids GPU timeouts when the Wayland compositor stops
+            // presenting frames (e.g. window in background / occluded).
+            present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
