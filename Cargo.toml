@@ -16,4 +16,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 
 [patch.crates-io]
-blackbox-log = { path = "crates/blackbox-log" }
+blackbox-log = { git = "https://github.com/PedroS235/blackbox-log.git" }
