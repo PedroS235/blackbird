@@ -3,13 +3,15 @@ use egui_plot::{Line, LineStyle, PlotBounds, PlotPoints};
 
 use crate::app::PlotState;
 use crate::parser::FlightData;
+use crate::signal::timeseries::{SmoothingFactor, smooth_slice};
 
 const MAX_DISPLAY_PTS: usize = 1_000;
-const SMOOTH_WINDOW: usize = 5;
 
 const ROLL: Color32 = Color32::from_rgb(220, 80, 80);
 const PITCH: Color32 = Color32::from_rgb(80, 200, 80);
 const YAW: Color32 = Color32::from_rgb(80, 140, 220);
+const AXIS_COLORS: [Color32; 3] = [ROLL, PITCH, YAW];
+const AXIS_NAMES: [&str; 3] = ["roll", "pitch", "yaw"];
 const MOTOR_COLORS: [Color32; 4] = [
     Color32::from_rgb(255, 180, 50),
     Color32::from_rgb(50, 220, 220),
@@ -79,7 +81,7 @@ impl TimeseriesPanel {
 
         let has_gyro = self.show_gyro_unfilt || self.show_gyro_adc;
         let has_rc = self.show_setpoint || self.show_rc_command;
-        let has_motors = self.show_motors && !data.motor.is_empty();
+        let has_motors = self.show_motors && !data.motors.is_empty();
         let plot_count = [has_gyro, has_rc, has_motors]
             .iter()
             .filter(|&&v| v)
@@ -89,7 +91,7 @@ impl TimeseriesPanel {
 
         if has_gyro {
             let r = self.make_plot(("gyro", t0), plot_h, link_id).show(ui, |p| {
-                let (vmin, vmax) = view_range(p.plot_bounds(), &data.time_us, t0);
+                let (vmin, vmax) = view_range(p.plot_bounds(), data.time_us.as_slice(), t0);
                 p.set_auto_bounds(egui::Vec2b::new(false, true));
                 let cursor_x = p.pointer_coordinate().map(|c| c.x);
                 self.add_gyro_lines(p, data, t0, vmin, vmax);
@@ -102,7 +104,7 @@ impl TimeseriesPanel {
 
         if has_rc {
             let r = self.make_plot(("rc", t0), plot_h, link_id).show(ui, |p| {
-                let (vmin, vmax) = view_range(p.plot_bounds(), &data.time_us, t0);
+                let (vmin, vmax) = view_range(p.plot_bounds(), data.time_us.as_slice(), t0);
                 p.set_auto_bounds(egui::Vec2b::new(false, true));
                 let cursor_x = p.pointer_coordinate().map(|c| c.x);
                 self.add_rc_lines(p, data, t0, vmin, vmax);
@@ -117,7 +119,7 @@ impl TimeseriesPanel {
             let r = self
                 .make_plot(("motors", t0), plot_h, link_id)
                 .show(ui, |p| {
-                    let (vmin, vmax) = view_range(p.plot_bounds(), &data.time_us, t0);
+                    let (vmin, vmax) = view_range(p.plot_bounds(), data.time_us.as_slice(), t0);
                     p.set_auto_bounds(egui::Vec2b::new(false, true));
                     let cursor_x = p.pointer_coordinate().map(|c| c.x);
                     self.add_motor_lines(p, data, t0, vmin, vmax);
@@ -152,61 +154,41 @@ impl TimeseriesPanel {
         vmin: f64,
         vmax: f64,
     ) {
-        let axes = [
-            (
-                self.show_roll,
-                "roll",
-                ROLL,
-                &data.gyro_unfilt_roll,
-                &data.gyro_adc_roll,
-            ),
-            (
-                self.show_pitch,
-                "pitch",
-                PITCH,
-                &data.gyro_unfilt_pitch,
-                &data.gyro_adc_pitch,
-            ),
-            (
-                self.show_yaw,
-                "yaw",
-                YAW,
-                &data.gyro_unfilt_yaw,
-                &data.gyro_adc_yaw,
-            ),
-        ];
-        for (show, name, color, unfilt, adc) in axes {
-            if !show {
+        let shows = [self.show_roll, self.show_pitch, self.show_yaw];
+        for i in 0..3 {
+            if !shows[i] {
                 continue;
             }
-            if self.show_gyro_unfilt
-                && let Some(v) = unfilt
-            {
-                p.line(
-                    self.make_line(
-                        format!("{name} pre"),
-                        &data.time_us,
-                        v,
+            let name = AXIS_NAMES[i];
+            let color = AXIS_COLORS[i];
+            if self.show_gyro_unfilt {
+                if let Some(samples) = &data.raw_gyro[i] {
+                    p.line(
+                        self.make_line(
+                            format!("{name} pre"),
+                            data.time_us.as_slice(),
+                            samples,
+                            t0,
+                            vmin,
+                            vmax,
+                            color,
+                        )
+                        .style(LineStyle::dashed_dense()),
+                    );
+                }
+            }
+            if self.show_gyro_adc {
+                if let Some(samples) = &data.gyro[i] {
+                    p.line(self.make_line(
+                        format!("{name} post"),
+                        data.time_us.as_slice(),
+                        samples,
                         t0,
                         vmin,
                         vmax,
                         color,
-                    )
-                    .style(LineStyle::dashed_dense()),
-                );
-            }
-            if self.show_gyro_adc
-                && let Some(v) = adc
-            {
-                p.line(self.make_line(
-                    format!("{name} post"),
-                    &data.time_us,
-                    v,
-                    t0,
-                    vmin,
-                    vmax,
-                    color,
-                ));
+                    ));
+                }
             }
         }
     }
@@ -219,61 +201,41 @@ impl TimeseriesPanel {
         vmin: f64,
         vmax: f64,
     ) {
-        let axes = [
-            (
-                self.show_roll,
-                "roll",
-                ROLL,
-                &data.setpoint_roll,
-                &data.rc_command_roll,
-            ),
-            (
-                self.show_pitch,
-                "pitch",
-                PITCH,
-                &data.setpoint_pitch,
-                &data.rc_command_pitch,
-            ),
-            (
-                self.show_yaw,
-                "yaw",
-                YAW,
-                &data.setpoint_yaw,
-                &data.rc_command_yaw,
-            ),
-        ];
-        for (show, name, color, setpt, cmd) in axes {
-            if !show {
+        let shows = [self.show_roll, self.show_pitch, self.show_yaw];
+        for i in 0..3 {
+            if !shows[i] {
                 continue;
             }
-            if self.show_setpoint
-                && let Some(v) = setpt
-            {
-                p.line(self.make_line(
-                    format!("{name} setpoint"),
-                    &data.time_us,
-                    v,
-                    t0,
-                    vmin,
-                    vmax,
-                    color,
-                ));
-            }
-            if self.show_rc_command
-                && let Some(v) = cmd
-            {
-                p.line(
-                    self.make_line(
-                        format!("{name} cmd"),
-                        &data.time_us,
-                        v,
+            let name = AXIS_NAMES[i];
+            let color = AXIS_COLORS[i];
+            if self.show_setpoint {
+                if let Some(samples) = &data.setpoint[i] {
+                    p.line(self.make_line(
+                        format!("{name} setpoint"),
+                        data.time_us.as_slice(),
+                        samples,
                         t0,
                         vmin,
                         vmax,
                         color,
-                    )
-                    .style(LineStyle::dashed_dense()),
-                );
+                    ));
+                }
+            }
+            if self.show_rc_command {
+                if let Some(samples) = &data.rc_command[i] {
+                    p.line(
+                        self.make_line(
+                            format!("{name} cmd"),
+                            data.time_us.as_slice(),
+                            samples,
+                            t0,
+                            vmin,
+                            vmax,
+                            color,
+                        )
+                        .style(LineStyle::dashed_dense()),
+                    );
+                }
             }
         }
     }
@@ -286,12 +248,12 @@ impl TimeseriesPanel {
         vmin: f64,
         vmax: f64,
     ) {
-        for (i, vals) in data.motor.iter().enumerate() {
+        for (i, samples) in data.motors.iter().enumerate() {
             let color = MOTOR_COLORS.get(i).copied().unwrap_or(Color32::WHITE);
             p.line(self.make_line(
                 format!("M{}", i + 1),
-                &data.time_us,
-                vals,
+                data.time_us.as_slice(),
+                samples,
                 t0,
                 vmin,
                 vmax,
@@ -300,12 +262,11 @@ impl TimeseriesPanel {
         }
     }
 
-    // TODO: Create a type for the arguments
     fn make_line(
         &self,
         name: impl Into<String>,
         time_us: &[u64],
-        vals: &[f32],
+        vals: &[f64],
         t0: u64,
         vmin: f64,
         vmax: f64,
@@ -316,8 +277,6 @@ impl TimeseriesPanel {
     }
 }
 
-/// Returns the visible time range in normalized seconds (t - t0).
-/// Falls back to full data extent on first frame when bounds are degenerate.
 fn view_range(bounds: PlotBounds, time_us: &[u64], t0: u64) -> (f64, f64) {
     let min = bounds.min()[0];
     let max = bounds.max()[0];
@@ -330,10 +289,9 @@ fn view_range(bounds: PlotBounds, time_us: &[u64], t0: u64) -> (f64, f64) {
     (0.0, full_max)
 }
 
-/// Cull to viewport (+ 50% margin), downsample, normalize timestamps, optionally smooth.
 fn view_points(
     time_us: &[u64],
-    vals: &[f32],
+    vals: &[f64],
     t0: u64,
     vmin: f64,
     vmax: f64,
@@ -342,7 +300,6 @@ fn view_points(
     let span = (vmax - vmin).max(0.001);
     let margin_us = (span * 0.5 * 1_000_000.0) as u64;
 
-    // Convert normalized view bounds back to raw µs for binary search
     let lo = t0
         .saturating_add((vmin * 1_000_000.0) as u64)
         .saturating_sub(margin_us);
@@ -356,15 +313,18 @@ fn view_points(
     let mut pts = minmax_downsample(&time_us[start..end], &vals[start..end], t0, MAX_DISPLAY_PTS);
 
     if smooth {
-        moving_average(&mut pts, SMOOTH_WINDOW);
+        let ys: Vec<f64> = pts.iter().map(|p| p[1]).collect();
+        if let Some(smoothed) = smooth_slice(&ys, SmoothingFactor::Medium) {
+            for (p, y) in pts.iter_mut().zip(smoothed) {
+                p[1] = y;
+            }
+        }
     }
 
     PlotPoints::new(pts)
 }
 
-/// Min-max downsample. Bins into `max_pts/2` buckets, emits (min, max) per bucket
-/// in time order. Preserves peaks and troughs. Outputs normalized x in seconds.
-fn minmax_downsample(time_us: &[u64], vals: &[f32], t0: u64, max_pts: usize) -> Vec<[f64; 2]> {
+fn minmax_downsample(time_us: &[u64], vals: &[f64], t0: u64, max_pts: usize) -> Vec<[f64; 2]> {
     let n = time_us.len();
     if n == 0 {
         return Vec::new();
@@ -376,7 +336,7 @@ fn minmax_downsample(time_us: &[u64], vals: &[f32], t0: u64, max_pts: usize) -> 
         return time_us
             .iter()
             .zip(vals.iter())
-            .map(|(&t, &v)| [norm(t), v as f64])
+            .map(|(&t, &v)| [norm(t), v])
             .collect();
     }
 
@@ -407,11 +367,11 @@ fn minmax_downsample(time_us: &[u64], vals: &[f32], t0: u64, max_pts: usize) -> 
         }
 
         if min_t <= max_t {
-            out.push([norm(min_t), min_v as f64]);
-            out.push([norm(max_t), max_v as f64]);
+            out.push([norm(min_t), min_v]);
+            out.push([norm(max_t), max_v]);
         } else {
-            out.push([norm(max_t), max_v as f64]);
-            out.push([norm(min_t), min_v as f64]);
+            out.push([norm(max_t), max_v]);
+            out.push([norm(min_t), min_v]);
         }
 
         i = end;
@@ -420,8 +380,6 @@ fn minmax_downsample(time_us: &[u64], vals: &[f32], t0: u64, max_pts: usize) -> 
     out
 }
 
-/// Centered moving average over the y-values. Smooths the display line
-/// without affecting x positions, using a symmetric window clamped at edges.
 pub(crate) fn moving_average(pts: &mut Vec<[f64; 2]>, window: usize) {
     if window <= 1 || pts.len() < window {
         return;

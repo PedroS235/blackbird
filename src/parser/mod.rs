@@ -1,76 +1,125 @@
-mod header;
-mod timeseries;
+mod flight_data;
+mod metadata;
+mod sample_rate;
 
-pub use header::HeaderData;
-pub use timeseries::FlightData;
+pub use flight_data::FlightData;
+pub use metadata::Metadata;
+pub use sample_rate::SampleRateEstimate;
 
 use blackbox_log::frame::{Frame as _, FrameDef as _, MainValue};
-use blackbox_log::{Filter, FilterSet, ParserEvent};
+use blackbox_log::{ParserEvent, headers};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug)]
 pub struct ParsedLog {
-    pub header: HeaderData,
-    pub data: FlightData,
+    pub metadata: Metadata,
+    pub flight_data: FlightData,
     pub log_index: usize,
 }
 
 #[derive(Debug, Error)]
 pub enum ParseError {
+    #[error("Failed to read file: {0}")]
+    Io(String),
     #[error("Log index {index:?} out of range (file has {count:?} logs)")]
     InvalidLogIndex { index: usize, count: usize },
+    #[error("Failed to read header from log: {0}")]
+    InvalidHeader(String),
+    #[error("Firmware version {0} is not yet supported")]
+    UnsupportedFirmwareVersion(String),
+    #[error("Firmware {0} is not supported")]
+    UnsupportedFirmware(String),
     #[error("Corrupt log: {0}")]
     Corrupt(String),
 }
 
-// INFO: Fields of interest
-const FIELDS: [&str; 5] = ["gyroUnfilt", "gyroADC", "setpoint", "rcCommand", "motor"];
-
-pub fn log_count(bytes: &[u8]) -> usize {
-    blackbox_log::File::new(bytes).log_count()
+pub struct LogFile {
+    bytes: Arc<Vec<u8>>,
+    pub file_name: String,
 }
 
-pub fn parse(bytes: &[u8], log_index: usize, on_progress: impl Fn(usize)) -> Result<ParsedLog, ParseError> {
-    let file = blackbox_log::File::new(bytes);
-    let count = file.log_count();
-
-    if log_index >= count {
-        return Err(ParseError::InvalidLogIndex {
-            index: log_index,
-            count,
-        });
+impl LogFile {
+    pub fn open(path: &Path) -> Result<Self, ParseError> {
+        let bytes = std::fs::read(path).map_err(|e| ParseError::Io(e.to_string()))?;
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(Self { bytes: Arc::new(bytes), file_name })
     }
 
-    let headers = file
-        .parse(log_index)
-        .unwrap() // safe: index checked above
-        .map_err(|e| ParseError::Corrupt(e.to_string()))?;
+    pub fn log_count(&self) -> usize {
+        blackbox_log::File::new(&self.bytes).log_count()
+    }
 
-    let header = build_header(&headers);
+    pub fn parse_logs(&self, on_progress: impl Fn(usize)) -> Result<Vec<ParsedLog>, ParseError> {
+        (0..self.log_count())
+            .map(|i| self.parse_log(i, &on_progress))
+            .collect()
+    }
 
-    let filters = FilterSet {
-        main: Filter::OnlyFields(FIELDS.into()),
-        slow: Filter::only_required(),
-        gps: Filter::only_required(),
-    };
-    let mut parser = headers.data_parser_with_filters(&filters);
+    pub fn parse_log(
+        &self,
+        log_index: usize,
+        on_progress: impl Fn(usize),
+    ) -> Result<ParsedLog, ParseError> {
+        let file = blackbox_log::File::new(&self.bytes);
+        let count = file.log_count();
 
-    let field_names: Vec<String> = parser
-        .main_frame_def()
-        .iter()
-        .map(|f| f.name.to_owned())
-        .collect();
+        let Some(parsed_header) = file.parse(log_index) else {
+            return Err(ParseError::InvalidLogIndex {
+                index: log_index,
+                count,
+            });
+        };
 
-    let data = build_flight_data(&mut parser, &field_names, &on_progress);
+        match parsed_header {
+            Ok(header) => {
+                let mut metadata = build_metadata(&header, &self.file_name);
+                let mut parser = header.data_parser();
 
-    Ok(ParsedLog {
-        header,
-        data,
-        log_index,
-    })
+                let field_names: Vec<String> = parser
+                    .main_frame_def()
+                    .iter()
+                    .map(|f| f.name.to_owned())
+                    .collect();
+
+                let flight_data = build_flight_data(&mut parser, &field_names, &on_progress);
+                metadata.duration = flight_data
+                    .time_us
+                    .first()
+                    .zip(flight_data.time_us.last())
+                    .map(|(f, l)| Duration::from_micros(l.saturating_sub(*f)))
+                    .unwrap_or(Duration::ZERO);
+
+                Ok(ParsedLog {
+                    metadata,
+                    flight_data,
+                    log_index,
+                })
+            }
+            Err(e) => match e {
+                headers::ParseError::UnsupportedFirmwareVersion(firmware) => {
+                    Err(ParseError::UnsupportedFirmwareVersion(format!(
+                        "{} {}",
+                        firmware.name(),
+                        firmware.version()
+                    )))
+                }
+                headers::ParseError::InvalidFirmware(rev) => Err(ParseError::UnsupportedFirmware(rev)),
+                headers::ParseError::InvalidHeader { header, value: _ } => {
+                    Err(ParseError::InvalidHeader(header))
+                }
+                e => Err(ParseError::Corrupt(e.to_string())),
+            },
+        }
+    }
 }
 
-fn build_header(headers: &blackbox_log::Headers<'_>) -> HeaderData {
+fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metadata {
     let craft_name = headers.craft_name().unwrap_or("Unknown").to_owned();
     let board = headers.board_info().unwrap_or("Unknown").to_owned();
     let firmware = {
@@ -82,39 +131,46 @@ fn build_header(headers: &blackbox_log::Headers<'_>) -> HeaderData {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    let sample_rate_hz = raw_headers
+    let looptime_us = raw_headers
         .get("looptime")
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .filter(|&t| t > 0.0)
-        .map(|looptime_us| 1_000_000.0 / looptime_us);
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&t| t > 0);
     let rpm_filter = parse_rpm_filter(&raw_headers);
 
-    HeaderData {
+    Metadata {
+        file_name: file_name.to_owned(),
         craft_name,
         firmware,
         board,
-        sample_rate_hz,
+        looptime_us,
+        duration: Duration::ZERO,
         rpm_filter,
         raw_headers,
     }
 }
 
-fn parse_rpm_filter(h: &std::collections::HashMap<String, String>) -> Option<header::RpmFilterConfig> {
+fn parse_rpm_filter(
+    h: &std::collections::HashMap<String, String>,
+) -> Option<metadata::RpmFilterConfig> {
     let harmonics = h.get("rpm_filter_harmonics")?.trim().parse::<u32>().ok()?;
     if harmonics == 0 {
         return None;
     }
-    let min_hz = h.get("rpm_filter_min_hz")
+    let min_hz = h
+        .get("rpm_filter_min_hz")
         .and_then(|v| v.trim().parse::<f32>().ok())
         .unwrap_or(150.0);
-    let fade_range_hz = h.get("rpm_filter_fade_range_hz")
+    let fade_range_hz = h
+        .get("rpm_filter_fade_range_hz")
         .and_then(|v| v.trim().parse::<f32>().ok())
         .unwrap_or(50.0);
-    let q = h.get("rpm_filter_q")
+    let q = h
+        .get("rpm_filter_q")
         .and_then(|v| v.trim().parse::<f32>().ok())
         .map(|q100| q100 / 100.0)
         .unwrap_or(5.0);
-    let weights = h.get("rpm_filter_weights")
+    let weights = h
+        .get("rpm_filter_weights")
         .map(|v| {
             v.split(',')
                 .filter_map(|s| s.trim().parse::<f32>().ok())
@@ -122,10 +178,15 @@ fn parse_rpm_filter(h: &std::collections::HashMap<String, String>) -> Option<hea
                 .collect()
         })
         .unwrap_or_else(|| vec![1.0; harmonics as usize]);
-    Some(header::RpmFilterConfig { harmonics, min_hz, fade_range_hz, q, weights })
+    Some(metadata::RpmFilterConfig {
+        harmonics,
+        min_hz,
+        fade_range_hz,
+        q,
+        weights,
+    })
 }
 
-/// Strips `[N]` from field names, returning `(base, axis_index)`.
 fn split_field_name(name: &str) -> (&str, usize) {
     name.split_once('[')
         .and_then(|(base, rest)| {
@@ -136,50 +197,66 @@ fn split_field_name(name: &str) -> (&str, usize) {
         .unwrap_or((name, 0))
 }
 
-fn main_value_to_f32(value: MainValue) -> f32 {
+fn main_value_to_f64(value: MainValue) -> f64 {
     use blackbox_log::units::si::{
         acceleration::meter_per_second_squared, angular_velocity::degree_per_second,
         electric_current::ampere, electric_potential::volt,
     };
     match value {
-        MainValue::Rotation(r) => r.get::<degree_per_second>() as f32,
-        MainValue::Signed(i) => i as f32,
-        MainValue::Unsigned(u) => u as f32,
-        MainValue::Acceleration(a) => a.get::<meter_per_second_squared>() as f32,
-        MainValue::Voltage(v) => v.get::<volt>() as f32,
-        MainValue::Amperage(a) => a.get::<ampere>() as f32,
+        MainValue::Rotation(r) => r.get::<degree_per_second>(),
+        MainValue::Signed(i) => i as f64,
+        MainValue::Unsigned(u) => u as f64,
+        MainValue::Acceleration(a) => a.get::<meter_per_second_squared>(),
+        MainValue::Voltage(v) => v.get::<volt>(),
+        MainValue::Amperage(a) => a.get::<ampere>(),
     }
 }
 
+#[derive(Debug)]
 struct FieldIndices {
-    gyro_unfilt: [Option<usize>; 3],
-    gyro_adc: [Option<usize>; 3],
+    raw_gyro: [Option<usize>; 3],
+    gyro: [Option<usize>; 3],
+    acceleration: [Option<usize>; 3],
     setpoint: [Option<usize>; 4],
     rc_command: [Option<usize>; 4],
-    motor: Vec<Option<usize>>,
+    motors: Vec<Option<usize>>,
+    vbat: Option<usize>,
+    current: Option<usize>,
+    rssi: Option<usize>,
+    debug: [Option<usize>; 8],
 }
 
 fn build_field_indices(field_names: &[String]) -> FieldIndices {
     let mut idx = FieldIndices {
-        gyro_unfilt: [None; 3],
-        gyro_adc: [None; 3],
+        raw_gyro: [None; 3],
+        gyro: [None; 3],
+        acceleration: [None; 3],
         setpoint: [None; 4],
         rc_command: [None; 4],
-        motor: Vec::new(),
+        motors: Vec::new(),
+        vbat: None,
+        current: None,
+        rssi: None,
+        debug: [None; 8],
     };
     for (col, name) in field_names.iter().enumerate() {
         let (base, axis) = split_field_name(name);
         match base {
-            "gyroUnfilt" if axis < 3 => idx.gyro_unfilt[axis] = Some(col),
-            "gyroADC" if axis < 3 => idx.gyro_adc[axis] = Some(col),
+            "gyroUnfilt" if axis < 3 => idx.raw_gyro[axis] = Some(col),
+            "gyroADC" if axis < 3 => idx.gyro[axis] = Some(col),
+            "accSmooth" if axis < 3 => idx.acceleration[axis] = Some(col),
             "setpoint" if axis < 4 => idx.setpoint[axis] = Some(col),
             "rcCommand" if axis < 4 => idx.rc_command[axis] = Some(col),
             "motor" => {
-                if idx.motor.len() <= axis {
-                    idx.motor.resize(axis + 1, None);
+                if idx.motors.len() <= axis {
+                    idx.motors.resize(axis + 1, None);
                 }
-                idx.motor[axis] = Some(col);
+                idx.motors[axis] = Some(col);
             }
+            "debug" if axis < 8 => idx.debug[axis] = Some(col),
+            "vbatLatest" | "vbat" => idx.vbat = Some(col),
+            "amperageLatest" | "amperage" => idx.current = Some(col),
+            "rssi" => idx.rssi = Some(col),
             _ => {}
         }
     }
@@ -192,94 +269,93 @@ fn build_flight_data(
     on_progress: &impl Fn(usize),
 ) -> FlightData {
     let idx = build_field_indices(field_names);
-    let motor_count = idx.motor.len();
+    let motor_count = idx.motors.len();
 
-    let mut data = FlightData {
-        motor: vec![Vec::new(); motor_count],
-        ..FlightData::default()
-    };
-
-    macro_rules! init_opt_vecs {
-        ($guard:expr, $($field:ident),+) => {
-            if $guard {
-                $( data.$field = Some(Vec::new()); )+
-            }
-        };
-    }
-
-    init_opt_vecs!(
-        idx.gyro_unfilt[0].is_some(),
-        gyro_unfilt_roll,
-        gyro_unfilt_pitch,
-        gyro_unfilt_yaw
-    );
-    init_opt_vecs!(
-        idx.gyro_adc[0].is_some(),
-        gyro_adc_roll,
-        gyro_adc_pitch,
-        gyro_adc_yaw
-    );
-    init_opt_vecs!(
-        idx.setpoint[0].is_some(),
-        setpoint_roll,
-        setpoint_pitch,
-        setpoint_yaw,
-        setpoint_throttle
-    );
-    init_opt_vecs!(
-        idx.rc_command[0].is_some(),
-        rc_command_roll,
-        rc_command_pitch,
-        rc_command_yaw,
-        rc_command_throttle
-    );
+    let mut time_buf: Vec<u64> = Vec::new();
+    let mut gyro_unfilt_bufs: [Option<Vec<f64>>; 3] = idx.raw_gyro.map(|o| o.map(|_| Vec::new()));
+    let mut gyro_adc_bufs: [Option<Vec<f64>>; 3] = idx.gyro.map(|o| o.map(|_| Vec::new()));
+    let mut acc_bufs: [Option<Vec<f64>>; 3] = idx.acceleration.map(|o| o.map(|_| Vec::new()));
+    let mut setpoint_bufs: [Option<Vec<f64>>; 4] = idx.setpoint.map(|o| o.map(|_| Vec::new()));
+    let mut rc_command_bufs: [Option<Vec<f64>>; 4] = idx.rc_command.map(|o| o.map(|_| Vec::new()));
+    let mut motor_bufs: Vec<Vec<f64>> = vec![Vec::new(); motor_count];
+    let mut vbat_buf: Option<Vec<f64>> = idx.vbat.map(|_| Vec::new());
+    let mut current_buf: Option<Vec<f64>> = idx.current.map(|_| Vec::new());
+    let mut rssi_buf: Option<Vec<f64>> = idx.rssi.map(|_| Vec::new());
+    let mut debug_bufs: [Option<Vec<f64>>; 8] = idx.debug.map(|o| o.map(|_| Vec::new()));
 
     let mut frame_count = 0usize;
+    let mut vals: Vec<f64> = Vec::with_capacity(field_names.len());
     while let Some(event) = parser.next() {
         let ParserEvent::Main(frame) = event else {
             continue;
         };
 
         frame_count += 1;
-        if frame_count % 5_000 == 0 {
+        if frame_count.is_multiple_of(5_000) {
             on_progress(frame_count);
         }
 
-        data.time_us.push(frame.time_raw());
-        let vals: Vec<f32> = frame.iter().map(main_value_to_f32).collect();
+        time_buf.push(frame.time_raw());
+        vals.clear();
+        vals.extend(frame.iter().map(main_value_to_f64));
 
-        macro_rules! push {
-            ($vec:expr, $col:expr) => {
-                if let (Some(v), Some(i)) = ($vec.as_mut(), $col) {
-                    v.push(vals[i]);
-                }
-            };
-        }
-
-        push!(data.gyro_unfilt_roll, idx.gyro_unfilt[0]);
-        push!(data.gyro_unfilt_pitch, idx.gyro_unfilt[1]);
-        push!(data.gyro_unfilt_yaw, idx.gyro_unfilt[2]);
-
-        push!(data.gyro_adc_roll, idx.gyro_adc[0]);
-        push!(data.gyro_adc_pitch, idx.gyro_adc[1]);
-        push!(data.gyro_adc_yaw, idx.gyro_adc[2]);
-
-        push!(data.setpoint_roll, idx.setpoint[0]);
-        push!(data.setpoint_pitch, idx.setpoint[1]);
-        push!(data.setpoint_yaw, idx.setpoint[2]);
-        push!(data.setpoint_throttle, idx.setpoint[3]);
-
-        push!(data.rc_command_roll, idx.rc_command[0]);
-        push!(data.rc_command_pitch, idx.rc_command[1]);
-        push!(data.rc_command_yaw, idx.rc_command[2]);
-        push!(data.rc_command_throttle, idx.rc_command[3]);
-
-        for (i, motor_col) in idx.motor.iter().enumerate() {
-            if let Some(col) = motor_col {
-                data.motor[i].push(vals[*col]);
+        let push = |buf: &mut Option<Vec<f64>>, col: Option<usize>| {
+            if let Some((b, c)) = buf.as_mut().zip(col) {
+                b.push(vals[c]);
             }
-        }
+        };
+        gyro_unfilt_bufs
+            .iter_mut()
+            .zip(idx.raw_gyro)
+            .for_each(|(b, c)| push(b, c));
+        gyro_adc_bufs
+            .iter_mut()
+            .zip(idx.gyro)
+            .for_each(|(b, c)| push(b, c));
+        acc_bufs
+            .iter_mut()
+            .zip(idx.acceleration)
+            .for_each(|(b, c)| push(b, c));
+        setpoint_bufs
+            .iter_mut()
+            .zip(idx.setpoint)
+            .for_each(|(b, c)| push(b, c));
+        rc_command_bufs
+            .iter_mut()
+            .zip(idx.rc_command)
+            .for_each(|(b, c)| push(b, c));
+        motor_bufs
+            .iter_mut()
+            .zip(idx.motors.iter().copied())
+            .for_each(|(buf, col)| {
+                if let Some(c) = col {
+                    buf.push(vals[c]);
+                }
+            });
+        push(&mut vbat_buf, idx.vbat);
+        push(&mut current_buf, idx.current);
+        push(&mut rssi_buf, idx.rssi);
+        debug_bufs
+            .iter_mut()
+            .zip(idx.debug)
+            .for_each(|(b, c)| push(b, c));
     }
 
-    data
+    let sample_rate = SampleRateEstimate::from_timestamps(&time_buf);
+
+    FlightData {
+        time_us: Arc::new(time_buf),
+        sample_rate,
+        raw_gyro: gyro_unfilt_bufs,
+        gyro: gyro_adc_bufs,
+        acceleration: acc_bufs,
+        setpoint: setpoint_bufs,
+        rc_command: rc_command_bufs,
+        motors: motor_bufs,
+        rpm: Vec::new(),
+        vbat: vbat_buf,
+        current: current_buf,
+        rssi: rssi_buf,
+        debug: debug_bufs,
+    }
 }

@@ -1,5 +1,5 @@
 use rustfft::{FftPlanner, num_complex::Complex};
-use std::f32::consts::PI;
+use std::f64::consts::PI;
 
 pub const N_THROTTLE_BINS: usize = 10;
 const WINDOW_SIZE: usize = 1600;
@@ -35,8 +35,8 @@ impl Default for SpectralResult {
 }
 
 pub fn compute_spectral(
-    signal: &[f32],
-    throttle: Option<&[f32]>,
+    signal: &[f64],
+    throttle: Option<&[f64]>,
     sample_rate_hz: f32,
 ) -> SpectralResult {
     let n = signal.len();
@@ -47,15 +47,15 @@ pub fn compute_spectral(
     let n_freq = WINDOW_SIZE / 2 + 1;
     let freq_resolution_hz = sample_rate_hz / WINDOW_SIZE as f32;
 
-    let hann: Vec<f32> = (0..WINDOW_SIZE)
-        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (WINDOW_SIZE as f32 - 1.0)).cos()))
+    let hann: Vec<f64> = (0..WINDOW_SIZE)
+        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / (WINDOW_SIZE as f64 - 1.0)).cos()))
         .collect();
-    let hann_power: f32 = hann.iter().map(|&w| w * w).sum::<f32>() / WINDOW_SIZE as f32;
+    let hann_power: f64 = hann.iter().map(|&w| w * w).sum::<f64>() / WINDOW_SIZE as f64;
 
-    let norm_throttle: Option<Vec<f32>> = throttle.map(|t| {
+    let norm_throttle: Option<Vec<f64>> = throttle.map(|t| {
         let (tmin, tmax) = t
             .iter()
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), &v| {
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| {
                 (mn.min(v), mx.max(v))
             });
         let range = (tmax - tmin).max(1e-6);
@@ -64,18 +64,12 @@ pub fn compute_spectral(
             .collect()
     });
 
-    let mut planner = FftPlanner::<f32>::new();
+    let mut planner = FftPlanner::<f64>::new();
     let fft = planner.plan_fft_forward(WINDOW_SIZE);
 
-    let mut mag2_sum = vec![vec![0.0f32; n_freq]; N_THROTTLE_BINS];
+    let mut mag2_sum = vec![vec![0.0f64; n_freq]; N_THROTTLE_BINS];
     let mut counts = vec![0usize; N_THROTTLE_BINS];
-    let mut buf = vec![
-        Complex {
-            re: 0.0f32,
-            im: 0.0f32
-        };
-        WINDOW_SIZE
-    ];
+    let mut buf = vec![Complex { re: 0.0f64, im: 0.0f64 }; WINDOW_SIZE];
 
     let mut start = 0;
     while start + WINDOW_SIZE <= n {
@@ -83,20 +77,17 @@ pub fn compute_spectral(
         let tbin = norm_throttle
             .as_ref()
             .map_or(0, |t| {
-                (t.get(mid).copied().unwrap_or(0.0) * N_THROTTLE_BINS as f32) as usize
+                (t.get(mid).copied().unwrap_or(0.0) * N_THROTTLE_BINS as f64) as usize
             })
             .min(N_THROTTLE_BINS - 1);
 
         for (i, &s) in signal[start..start + WINDOW_SIZE].iter().enumerate() {
-            buf[i] = Complex {
-                re: s * hann[i],
-                im: 0.0,
-            };
+            buf[i] = Complex { re: s * hann[i], im: 0.0 };
         }
         fft.process(&mut buf);
 
         for k in 0..n_freq {
-            mag2_sum[tbin][k] += buf[k].norm_sqr() / (WINDOW_SIZE as f32 * hann_power);
+            mag2_sum[tbin][k] += buf[k].norm_sqr() / (WINDOW_SIZE as f64 * hann_power);
         }
         counts[tbin] += 1;
         start += HOP;
@@ -110,7 +101,7 @@ pub fn compute_spectral(
                 return vec![f32::NAN; n_freq];
             }
             row.iter()
-                .map(|&m| 20.0 * (m / cnt as f32).sqrt().max(1e-10).log10())
+                .map(|&m| (20.0 * (m / cnt as f64).sqrt().max(1e-10).log10()) as f32)
                 .collect()
         })
         .collect();
@@ -132,7 +123,6 @@ pub fn compute_spectral(
         }
     }
 
-    // Shift to relative dB: peak = 0 dB, everything else negative.
     let peak_db = overall
         .iter()
         .copied()

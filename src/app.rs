@@ -42,7 +42,10 @@ enum LoadEvent {
 
 enum LoadState {
     Idle,
-    Loading { rx: Receiver<LoadEvent>, expected: usize },
+    Loading {
+        rx: Receiver<LoadEvent>,
+        expected: usize,
+    },
 }
 
 pub struct PlotState {
@@ -63,6 +66,7 @@ impl Default for PlotState {
 
 impl Default for App {
     fn default() -> Self {
+        tracing::info!("Starting application");
         Self {
             logs: Vec::new(),
             active_log: 0,
@@ -93,7 +97,9 @@ impl eframe::App for App {
                     ui.add(egui::Spinner::new());
                     let frames = self.loading_frames;
                     if frames > 0 {
-                        ui.label(format!("Loading… {loaded_count}/{expected} — {frames} frames"));
+                        ui.label(format!(
+                            "Loading… {loaded_count}/{expected} — {frames} frames"
+                        ));
                     } else {
                         ui.label(format!("Loading… {loaded_count}/{expected}"));
                     }
@@ -102,15 +108,8 @@ impl eframe::App for App {
                 }
                 if let Some(log) = self.logs.get(self.active_log) {
                     ui.separator();
-                    ui.label(&log.parsed.header.craft_name);
-                    ui.label(&log.parsed.header.firmware);
-                    let actual_hz = crate::analysis::sample_rate_from_timestamps(
-                        &log.parsed.data.time_us,
-                    );
-                    let display_hz = actual_hz
-                        .or(log.parsed.header.sample_rate_hz)
-                        .unwrap_or(0.0);
-                    ui.label(format!("{display_hz:.0} Hz"));
+                    ui.label(&log.parsed.metadata.craft_name);
+                    ui.label(&log.parsed.metadata.firmware);
                 }
                 if let Some(err) = &self.error {
                     ui.separator();
@@ -127,7 +126,7 @@ impl eframe::App for App {
                     ui.heading("Logs");
                     ui.separator();
                     for i in 0..self.logs.len() {
-                        let frames = self.logs[i].parsed.data.time_us.len();
+                        let frames = self.logs[i].parsed.flight_data.time_us.len();
                         let label = format!("Log {}  ({} frames)", i + 1, frames);
                         if ui.selectable_label(self.active_log == i, label).clicked() {
                             self.active_log = i;
@@ -143,7 +142,7 @@ impl eframe::App for App {
                 .resizable(true)
                 .default_size(220.0)
                 .show_inside(ui, |ui| {
-                    log_info::show(ui, &log.parsed.header);
+                    log_info::show(ui, &log.parsed.metadata, log.parsed.flight_data.sample_rate.rate_hz);
                 });
         }
 
@@ -174,15 +173,15 @@ impl eframe::App for App {
             match self.active_panel {
                 ActivePanel::Timeseries => {
                     self.timeseries_panel
-                        .show(ui, &log.parsed.data, &mut self.plot_state);
+                        .show(ui, &log.parsed.flight_data, &mut self.plot_state);
                 }
                 ActivePanel::Spectral => {
-                    self.spectral_panel.show(ui, &log.analysis, &log.parsed.header);
+                    self.spectral_panel
+                        .show(ui, &log.analysis, &log.parsed.metadata);
                 }
                 ActivePanel::StepResponse => {
-                    let hz = log.parsed.header.sample_rate_hz.unwrap_or(1000.0);
                     self.step_response_panel
-                        .show(ui, &log.parsed.data, hz, &log.analysis);
+                        .show(ui, &log.parsed.flight_data, &log.analysis);
                 }
             }
         });
@@ -224,6 +223,7 @@ impl App {
                     if self.logs.is_empty() {
                         self.error = Some("All logs in file were corrupt".to_owned());
                     }
+                    self.logs.sort_by_key(|l| l.parsed.log_index);
                     self.step_response_panel.invalidate_cache();
                     self.load_state = LoadState::Idle;
                     return;
@@ -240,37 +240,45 @@ impl App {
             return;
         };
 
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
+        let file = match parser::LogFile::open(&path) {
+            Ok(f) => f,
             Err(e) => {
                 self.error = Some(format!("Failed to read: {e}"));
                 return;
             }
         };
 
-        let count = parser::log_count(&bytes);
+        let count = file.log_count();
         if count == 0 {
             self.error = Some("No valid logs found in file".to_owned());
             return;
         }
 
         let (tx, rx) = mpsc::channel();
-        self.load_state = LoadState::Loading { rx, expected: count };
+        self.load_state = LoadState::Loading {
+            rx,
+            expected: count,
+        };
         self.logs.clear();
         self.loading_frames = 0;
         self.error = None;
 
-        std::thread::spawn(move || {
-            for i in 0..count {
-                match parser::parse(&bytes, i, |frames| { tx.send(LoadEvent::Progress(frames)).ok(); }) {
+        let file = std::sync::Arc::new(file);
+        for i in 0..count {
+            let file = file.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                match file.parse_log(i, |frames| {
+                    tx.send(LoadEvent::Progress(frames)).ok();
+                }) {
                     Ok(parsed) => {
-                        let hz = parsed.header.sample_rate_hz.unwrap_or(1000.0);
-                        let analysis = analysis::analyse(&parsed.data, hz);
-                        tx.send(LoadEvent::LogReady(LoadedLog { parsed, analysis })).ok();
+                        let analysis = analysis::analyse(&parsed.flight_data);
+                        tx.send(LoadEvent::LogReady(LoadedLog { parsed, analysis }))
+                            .ok();
                     }
                     Err(e) => tracing::warn!("Log {i} skipped: {e}"),
                 }
-            }
-        });
+            });
+        }
     }
 }

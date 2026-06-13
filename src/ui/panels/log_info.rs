@@ -1,30 +1,29 @@
-use crate::parser::HeaderData;
+use crate::parser::Metadata;
 
 const PID_KEYS: &[(&str, &str)] = &[
-    ("rollPID",   "Roll"),
-    ("pitchPID",  "Pitch"),
-    ("yawPID",    "Yaw"),
+    ("rollPID", "Roll"),
+    ("pitchPID", "Pitch"),
+    ("yawPID", "Yaw"),
 ];
 
 const FILTER_KEYS: &[(&str, &str)] = &[
-    ("gyro_lowpass_hz",   "Gyro LPF"),
-    ("gyro_lowpass2_hz",  "Gyro LPF2"),
-    ("dterm_lowpass_hz",  "D-term LPF"),
+    ("gyro_lowpass_hz", "Gyro LPF"),
+    ("gyro_lowpass2_hz", "Gyro LPF2"),
+    ("dterm_lowpass_hz", "D-term LPF"),
     ("dterm_lowpass2_hz", "D-term LPF2"),
     ("gyro_rpm_notch_harmonics", "RPM harmonics"),
-    ("gyro_rpm_notch_min",       "RPM min"),
+    ("gyro_rpm_notch_min", "RPM min"),
 ];
 
-pub fn show(ui: &mut egui::Ui, h: &HeaderData) {
+pub fn show(ui: &mut egui::Ui, h: &Metadata, sample_rate_hz: f32) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.heading(&h.craft_name);
         ui.label(format!("Firmware: {}", h.firmware));
         if !h.board.is_empty() {
             ui.label(format!("Board: {}", h.board));
         }
-        if let Some(hz) = h.sample_rate_hz {
-            ui.label(format!("Sample rate: {} Hz", hz));
-        }
+        ui.label(format!("Duration: {:.1}s", h.duration.as_secs_f32()));
+        ui.label(format!("Sample rate: {:.0} Hz", sample_rate_hz));
 
         ui.separator();
         ui.strong("PIDs");

@@ -2,8 +2,8 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use egui_plot::{Line, PlotPoint, PlotPoints, Polygon, Text};
 
 use crate::{
-    analysis::{spectral::N_THROTTLE_BINS, AnalysisResult},
-    parser::HeaderData,
+    analysis::{AnalysisResult, spectral::N_THROTTLE_BINS},
+    parser::Metadata,
     ui::panels::timeseries::moving_average,
 };
 
@@ -106,7 +106,7 @@ fn build_heatmap_texture(
 // ── panel ────────────────────────────────────────────────────────────────────
 
 impl SpectralPanel {
-    pub fn show(&mut self, ui: &mut egui::Ui, analysis: &AnalysisResult, header: &HeaderData) {
+    pub fn show(&mut self, ui: &mut egui::Ui, analysis: &AnalysisResult, header: &Metadata) {
         ui.horizontal(|ui| {
             for (i, name) in ["Roll", "Pitch", "Yaw"].iter().enumerate() {
                 ui.selectable_value(&mut self.selected_axis, i, *name);
@@ -147,16 +147,20 @@ impl SpectralPanel {
         &mut self,
         ui: &mut egui::Ui,
         analysis: &AnalysisResult,
-        header: &HeaderData,
+        header: &Metadata,
         result: &crate::analysis::SpectralResult,
     ) {
         let freq_res = result.freq_resolution_hz;
-        let max_bin =
-            ((MAX_FREQ_HZ / freq_res) as usize + 1).min(result.average_spectrum.len());
+        let max_bin = ((MAX_FREQ_HZ / freq_res) as usize + 1).min(result.average_spectrum.len());
 
         let mut pts: Vec<[f64; 2]> = (0..max_bin)
             .filter(|&k| result.average_spectrum[k].is_finite())
-            .map(|k| [k as f64 * freq_res as f64, result.average_spectrum[k] as f64])
+            .map(|k| {
+                [
+                    k as f64 * freq_res as f64,
+                    result.average_spectrum[k] as f64,
+                ]
+            })
             .collect();
         moving_average(&mut pts, 7);
         let points: PlotPoints = pts.into_iter().collect();
@@ -208,8 +212,7 @@ impl SpectralPanel {
                         } else {
                             1.0f32
                         };
-                        let weight =
-                            cfg.weights.get(h as usize - 1).copied().unwrap_or(1.0);
+                        let weight = cfg.weights.get(h as usize - 1).copied().unwrap_or(1.0);
                         let half_bw = center / (2.0 * cfg.q);
                         let alpha = (60.0 * weight * fade).clamp(0.0, 255.0) as u8;
                         bands.push(Band {
@@ -217,7 +220,10 @@ impl SpectralPanel {
                             center: center as f64,
                             hi: (center + half_bw) as f64,
                             color: Color32::from_rgba_unmultiplied(
-                                base.r(), base.g(), base.b(), alpha,
+                                base.r(),
+                                base.g(),
+                                base.b(),
+                                alpha,
                             ),
                             label: ORDINALS.get(h as usize - 1).copied().unwrap_or(""),
                         });
@@ -226,7 +232,11 @@ impl SpectralPanel {
             }
         }
 
-        let line_label = if self.show_filtered { "Filtered gyro" } else { "Raw gyro" };
+        let line_label = if self.show_filtered {
+            "Filtered gyro"
+        } else {
+            "Raw gyro"
+        };
 
         egui_plot::Plot::new("spectral_line")
             .x_axis_label("Frequency (Hz)")
@@ -236,8 +246,8 @@ impl SpectralPanel {
                 for (idx, band) in bands.iter().enumerate() {
                     let rect: Vec<[f64; 2]> = vec![
                         [band.lo, -120.0],
-                        [band.lo,    5.0],
-                        [band.hi,    5.0],
+                        [band.lo, 5.0],
+                        [band.hi, 5.0],
                         [band.hi, -120.0],
                     ];
                     p.polygon(
@@ -248,7 +258,10 @@ impl SpectralPanel {
                     );
                     if !band.label.is_empty() {
                         let text_color = Color32::from_rgba_unmultiplied(
-                            band.color.r(), band.color.g(), band.color.b(), 220,
+                            band.color.r(),
+                            band.color.g(),
+                            band.color.b(),
+                            220,
                         );
                         p.text(
                             Text::new("", PlotPoint::new(band.center, -1.0), band.label)
@@ -262,12 +275,7 @@ impl SpectralPanel {
             });
     }
 
-    fn show_heatmap(
-        &mut self,
-        ui: &mut egui::Ui,
-        throttle_map: &[Vec<f32>],
-        freq_res: f32,
-    ) {
+    fn show_heatmap(&mut self, ui: &mut egui::Ui, throttle_map: &[Vec<f32>], freq_res: f32) {
         let max_bin = ((MAX_FREQ_HZ / freq_res) as usize + 1)
             .min(throttle_map.first().map_or(0, |r| r.len()));
 
@@ -280,17 +288,21 @@ impl SpectralPanel {
 
         // Rebuild texture only when the data source changes.
         let cache_key = (self.selected_axis, self.show_filtered);
-        if self.heatmap_texture.as_ref().map_or(true, |(_, k)| *k != cache_key) {
+        if self
+            .heatmap_texture
+            .as_ref()
+            .map_or(true, |(_, k)| *k != cache_key)
+        {
             let tex = build_heatmap_texture(throttle_map, max_bin, ui.ctx());
             self.heatmap_texture = Some((tex, cache_key));
         }
         let texture_id = self.heatmap_texture.as_ref().unwrap().0.id();
 
         // ── layout ──────────────────────────────────────────────────────────
-        let margin_left   = 46.0f32; // Y-axis tick labels
+        let margin_left = 46.0f32; // Y-axis tick labels
         let margin_bottom = 34.0f32; // X-axis ticks + label
-        let margin_top    = 6.0f32;
-        let margin_right  = 44.0f32; // color bar + labels
+        let margin_top = 6.0f32;
+        let margin_right = 44.0f32; // color bar + labels
 
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let full = response.rect;
@@ -314,9 +326,9 @@ impl SpectralPanel {
             egui::StrokeKind::Outside,
         );
 
-        let tick_font  = FontId::proportional(10.0);
+        let tick_font = FontId::proportional(10.0);
         let label_font = FontId::proportional(11.0);
-        let tick_col   = Color32::from_gray(180);
+        let tick_col = Color32::from_gray(180);
 
         // ── Y-axis (throttle %) ──────────────────────────────────────────────
         painter.text(
@@ -386,7 +398,10 @@ impl SpectralPanel {
             );
         }
         painter.rect_stroke(
-            Rect::from_min_size(Pos2::new(bar_x, inner.min.y), Vec2::new(bar_w, inner.height())),
+            Rect::from_min_size(
+                Pos2::new(bar_x, inner.min.y),
+                Vec2::new(bar_w, inner.height()),
+            ),
             0.0,
             Stroke::new(1.0, Color32::from_gray(60)),
             egui::StrokeKind::Outside,

@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
 blackbox-log = "0.4.3"
 eframe = "0.34.2"
 egui = "0.34.2"
 egui_plot = "0.35.0"
 rfd = "0.17.2"
 rustfft = "6.4.1"
+scirs2-signal = "0.5.0"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

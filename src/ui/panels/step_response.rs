@@ -2,7 +2,7 @@ use egui::Color32;
 use egui_plot::{HLine, Line, LineStyle, PlotPoints};
 
 use crate::analysis::step_response::compute_step_response;
-use crate::analysis::{sample_rate_from_timestamps, AnalysisResult, StepResponseResult};
+use crate::analysis::{AnalysisResult, StepResponseResult};
 use crate::parser::FlightData;
 
 const ROLL: Color32 = Color32::from_rgb(220, 80, 80);
@@ -40,7 +40,6 @@ impl StepResponsePanel {
         &mut self,
         ui: &mut egui::Ui,
         data: &FlightData,
-        sample_rate_hz: f32,
         base_analysis: &AnalysisResult,
     ) {
         ui.horizontal(|ui| {
@@ -78,7 +77,7 @@ impl StepResponsePanel {
         let overlay = self.overlay;
         let selected_axis = self.selected_axis;
 
-        let results = self.get_results(data, sample_rate_hz, base_analysis);
+        let results = self.get_results(data, base_analysis);
         let any_steps = results.iter().any(|r| r.step_count > 0);
 
         if !any_steps {
@@ -111,7 +110,6 @@ impl StepResponsePanel {
     fn get_results<'a>(
         &'a mut self,
         data: &FlightData,
-        nominal_hz: f32,
         base_analysis: &'a AnalysisResult,
     ) -> &'a [StepResponseResult; 3] {
         let throttle_min = self.throttle_min_pct / 100.0;
@@ -123,18 +121,20 @@ impl StepResponsePanel {
         }
 
         if self.cached.is_none() {
-            let hz = sample_rate_from_timestamps(&data.time_us).unwrap_or(nominal_hz);
-            let throttle = data.setpoint_throttle.as_deref();
+            let hz = data.sample_rate.rate_hz;
+            let throttle = data.setpoint[3].as_deref();
             self.cached = Some(std::array::from_fn(|i| {
-                let (cmd, resp) = match i {
-                    0 => (data.setpoint_roll.as_deref(), data.gyro_adc_roll.as_deref()),
-                    1 => (data.setpoint_pitch.as_deref(), data.gyro_adc_pitch.as_deref()),
-                    _ => (data.setpoint_yaw.as_deref(), data.gyro_adc_yaw.as_deref()),
-                };
+                let cmd = data.setpoint[i].as_deref();
+                let resp = data.gyro[i].as_deref();
                 match (cmd, resp) {
-                    (Some(c), Some(r)) => {
-                        compute_step_response(c, r, throttle, throttle_min, throttle_max, hz)
-                    }
+                    (Some(c), Some(r)) => compute_step_response(
+                        c,
+                        r,
+                        throttle,
+                        throttle_min as f64,
+                        throttle_max as f64,
+                        hz,
+                    ),
                     _ => StepResponseResult::default(),
                 }
             }));
@@ -166,9 +166,21 @@ fn show_plot(ui: &mut egui::Ui, results: &[StepResponseResult; 3], axes: &[usize
         .include_y(0.0)
         .include_y(1.3)
         .show(ui, |p| {
-            p.hline(HLine::new("reference", 1.0).color(Color32::from_gray(160)).width(1.0));
-            p.hline(HLine::new("settle +5%", 1.05).color(Color32::from_gray(80)).width(1.0));
-            p.hline(HLine::new("settle -5%", 0.95).color(Color32::from_gray(80)).width(1.0));
+            p.hline(
+                HLine::new("reference", 1.0)
+                    .color(Color32::from_gray(160))
+                    .width(1.0),
+            );
+            p.hline(
+                HLine::new("settle +5%", 1.05)
+                    .color(Color32::from_gray(80))
+                    .width(1.0),
+            );
+            p.hline(
+                HLine::new("settle -5%", 0.95)
+                    .color(Color32::from_gray(80))
+                    .width(1.0),
+            );
 
             for &i in axes {
                 let r = &results[i];

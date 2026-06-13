@@ -2,15 +2,15 @@
 
 mod analysis;
 mod app;
+mod logging;
 mod parser;
+mod signal;
 mod ui;
 
+use crate::logging::init_logging;
+
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+    init_logging();
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/blackbird-icon.png"))
         .expect("The icon data must be valid");
@@ -20,8 +20,6 @@ fn main() {
             .with_inner_size([1200.0, 800.0])
             .with_icon(icon),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            // AutoNoVsync avoids GPU timeouts when the Wayland compositor stops
-            // presenting frames (e.g. window in background / occluded).
             present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
             ..Default::default()
         },

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct RpmFilterConfig {
@@ -12,12 +13,15 @@ pub struct RpmFilterConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct HeaderData {
+pub struct Metadata {
+    pub file_name: String,
     pub craft_name: String,
     pub firmware: String,
     pub board: String,
-    /// Derived from `looptime` unknown header: 1_000_000 / looptime_us
-    pub sample_rate_hz: Option<f32>,
+    /// Raw looptime from the log header (what the pilot configured in Betaflight).
+    pub looptime_us: Option<u32>,
+    /// Total flight duration, derived from first/last frame timestamp.
+    pub duration: Duration,
     pub rpm_filter: Option<RpmFilterConfig>,
     /// Passthrough for all non-standard headers (PIDs, filter settings, rates, etc.)
     pub raw_headers: HashMap<String, String>,
