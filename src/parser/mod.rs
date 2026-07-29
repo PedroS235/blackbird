@@ -336,6 +336,13 @@ fn build_flight_data(
 
     let sample_rate = SampleRateEstimate::from_timestamps(&time_buf);
 
+    // Betaflight logs rssi on its internal 0..=1023 scale, not 0..=100.
+    if let Some(buf) = &mut rssi_buf {
+        for v in buf.iter_mut() {
+            *v = *v * 100.0 / 1023.0;
+        }
+    }
+
     FlightData {
         time_us: Arc::new(time_buf),
         sample_rate,

@@ -17,6 +17,7 @@ pub struct TimeseriesPlot<'a> {
     pub t0: u64,
     pub series: Vec<Series<'a>>,
     pub default_x_range: Option<(f64, f64)>,
+    pub height: Option<f32>,
 }
 
 impl TimeseriesPlot<'_> {
@@ -43,14 +44,18 @@ impl TimeseriesPlot<'_> {
             .link_axis("shared_time", Vec2b::new(true, false))
             .link_cursor("shared_time", Vec2b::new(true, false))
             .allow_zoom(Vec2b::new(true, false))
-            .allow_scroll(Vec2b::new(true, false))
+            .allow_scroll(Vec2b::new(true, true))
             .allow_drag(Vec2b::new(true, false))
+            .center_y_axis(true)
             .auto_bounds(Vec2b::new(false, false))
             .default_y_bounds(y_min, y_max)
             .y_axis_label(&self.y_label);
 
         if let Some((min, max)) = self.default_x_range {
             plot = plot.default_x_bounds(min, max);
+        }
+        if let Some(height) = self.height {
+            plot = plot.height(height);
         }
 
         let t0 = self.t0;

@@ -11,7 +11,10 @@ use std::{
 use eframe::App;
 
 use crate::{
-    app::notification::Notification,
+    app::{
+        mainview::{MainTab, PidAnalysisTab, TimeseriesTab},
+        notification::Notification,
+    },
     parser::{self, LogFile, ParsedLog},
 };
 
@@ -22,7 +25,15 @@ pub struct BlackbirdApp {
     logs: Vec<LoadedLog>,
     notifications: VecDeque<Notification>,
     load_state: LoadState,
-    gyro_axis_visible: [bool; 3],
+    main_tab: MainTab,
+    timeseries_tab: TimeseriesTab,
+    pidanalysis_tab: PidAnalysisTab,
+    gyro_filtered_visible: [bool; 3],
+    gyro_raw_visible: [bool; 3],
+    setpoint_visible: [bool; 3],
+    vbat_visible: bool,
+    current_visible: bool,
+    rssi_visible: bool,
 }
 
 impl Default for BlackbirdApp {
@@ -32,7 +43,15 @@ impl Default for BlackbirdApp {
             logs: Default::default(),
             notifications: Default::default(),
             load_state: LoadState::Idle,
-            gyro_axis_visible: [true; 3],
+            main_tab: MainTab::default(),
+            timeseries_tab: TimeseriesTab::default(),
+            pidanalysis_tab: PidAnalysisTab::default(),
+            gyro_filtered_visible: [true; 3],
+            gyro_raw_visible: [true; 3],
+            setpoint_visible: [true; 3],
+            vbat_visible: true,
+            current_visible: true,
+            rssi_visible: true,
         }
     }
 }
