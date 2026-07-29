@@ -42,6 +42,27 @@ pub fn minmax_downsample(
     out
 }
 
+/// Downsample only the portion of `samples` visible in `[visible_start_s, visible_end_s]`,
+/// re-binning into `bucket_count` buckets each time the window changes — the zoomed-in
+/// equivalent of `minmax_downsample`, called every frame with the plot's current bounds.
+pub fn windowed_downsample(
+    time_us: &[u64],
+    samples: &[f64],
+    t0: u64,
+    visible_start_s: f64,
+    visible_end_s: f64,
+    bucket_count: usize,
+) -> Vec<[f64; 2]> {
+    let to_us = |s: f64| t0.saturating_add((s.max(0.0) * 1_000_000.0) as u64);
+    let lo = to_us(visible_start_s);
+    let hi = to_us(visible_end_s);
+
+    let start = time_us.partition_point(|&t| t < lo);
+    let end = time_us.partition_point(|&t| t <= hi);
+
+    minmax_downsample(&time_us[start..end], &samples[start..end], t0, bucket_count)
+}
+
 /// Smooth `samples` with a centred moving average of `window` samples.
 ///
 /// Returns `None` if `window <= 1` or shorter than the input. Output length equals input length;

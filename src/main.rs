@@ -1,11 +1,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod analysis;
+// mod analysis;
 mod app;
 mod logging;
 mod parser;
 mod signal;
-mod ui;
 
 use crate::logging::init_logging;
 
@@ -29,7 +28,10 @@ fn main() {
     eframe::run_native(
         "Blackbird",
         options,
-        Box::new(|_cc| Ok(Box::<app::App>::default())),
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::<app::BlackbirdApp>::default())
+        }),
     )
     .unwrap();
 }
