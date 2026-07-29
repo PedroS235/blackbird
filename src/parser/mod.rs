@@ -36,6 +36,7 @@ pub enum ParseError {
     Corrupt(String),
 }
 
+#[derive(Debug, Clone)]
 pub struct LogFile {
     bytes: Arc<Vec<u8>>,
     pub file_name: String,
@@ -48,24 +49,21 @@ impl LogFile {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        Ok(Self { bytes: Arc::new(bytes), file_name })
+        Ok(Self {
+            bytes: Arc::new(bytes),
+            file_name,
+        })
     }
 
     pub fn log_count(&self) -> usize {
         blackbox_log::File::new(&self.bytes).log_count()
     }
 
-    pub fn parse_logs(&self, on_progress: impl Fn(usize)) -> Result<Vec<ParsedLog>, ParseError> {
-        (0..self.log_count())
-            .map(|i| self.parse_log(i, &on_progress))
-            .collect()
+    pub fn parse_logs(&self) -> Result<Vec<ParsedLog>, ParseError> {
+        (0..self.log_count()).map(|i| self.parse_log(i)).collect()
     }
 
-    pub fn parse_log(
-        &self,
-        log_index: usize,
-        on_progress: impl Fn(usize),
-    ) -> Result<ParsedLog, ParseError> {
+    pub fn parse_log(&self, log_index: usize) -> Result<ParsedLog, ParseError> {
         let file = blackbox_log::File::new(&self.bytes);
         let count = file.log_count();
 
@@ -87,7 +85,7 @@ impl LogFile {
                     .map(|f| f.name.to_owned())
                     .collect();
 
-                let flight_data = build_flight_data(&mut parser, &field_names, &on_progress);
+                let flight_data = build_flight_data(&mut parser, &field_names);
                 metadata.duration = flight_data
                     .time_us
                     .first()
@@ -109,7 +107,9 @@ impl LogFile {
                         firmware.version()
                     )))
                 }
-                headers::ParseError::InvalidFirmware(rev) => Err(ParseError::UnsupportedFirmware(rev)),
+                headers::ParseError::InvalidFirmware(rev) => {
+                    Err(ParseError::UnsupportedFirmware(rev))
+                }
                 headers::ParseError::InvalidHeader { header, value: _ } => {
                     Err(ParseError::InvalidHeader(header))
                 }
@@ -266,7 +266,6 @@ fn build_field_indices(field_names: &[String]) -> FieldIndices {
 fn build_flight_data(
     parser: &mut blackbox_log::DataParser<'_, '_>,
     field_names: &[String],
-    on_progress: &impl Fn(usize),
 ) -> FlightData {
     let idx = build_field_indices(field_names);
     let motor_count = idx.motors.len();
@@ -283,17 +282,11 @@ fn build_flight_data(
     let mut rssi_buf: Option<Vec<f64>> = idx.rssi.map(|_| Vec::new());
     let mut debug_bufs: [Option<Vec<f64>>; 8] = idx.debug.map(|o| o.map(|_| Vec::new()));
 
-    let mut frame_count = 0usize;
     let mut vals: Vec<f64> = Vec::with_capacity(field_names.len());
     while let Some(event) = parser.next() {
         let ParserEvent::Main(frame) = event else {
             continue;
         };
-
-        frame_count += 1;
-        if frame_count.is_multiple_of(5_000) {
-            on_progress(frame_count);
-        }
 
         time_buf.push(frame.time_raw());
         vals.clear();
@@ -357,5 +350,157 @@ fn build_flight_data(
         current: current_buf,
         rssi: rssi_buf,
         debug: debug_bufs,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::parser::{LogFile, ParseError};
+    use std::collections::HashMap;
+    use std::{io::Write, path::Path};
+
+    #[test]
+    fn test_valid_path() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"H Product:Blackbox flight data recorder by Nicholas Sherlock")
+            .unwrap();
+
+        let path = file.path();
+        let log_file = LogFile::open(path).unwrap();
+
+        let expected_name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(log_file.file_name, expected_name.as_ref());
+    }
+
+    #[test]
+    fn test_invalid_path() {
+        let err = LogFile::open(Path::new("/nonexistent/file.bbl")).unwrap_err();
+        assert!(matches!(err, ParseError::Io(_)));
+    }
+
+    #[test]
+    fn split_field_name_with_index() {
+        assert_eq!(split_field_name("gyroADC[0]"), ("gyroADC", 0));
+        assert_eq!(split_field_name("motor[3]"), ("motor", 3));
+        assert_eq!(split_field_name("debug[7]"), ("debug", 7));
+    }
+
+    #[test]
+    fn split_field_name_no_index() {
+        assert_eq!(split_field_name("vbatLatest"), ("vbatLatest", 0));
+    }
+
+    #[test]
+    fn rpm_filter_none_when_missing() {
+        assert!(parse_rpm_filter(&HashMap::new()).is_none());
+    }
+
+    #[test]
+    fn rpm_filter_none_when_harmonics_zero() {
+        let h = HashMap::from([("rpm_filter_harmonics".into(), "0".into())]);
+        assert!(parse_rpm_filter(&h).is_none());
+    }
+
+    #[test]
+    fn rpm_filter_parses_values() {
+        let h = HashMap::from([
+            ("rpm_filter_harmonics".into(), "3".into()),
+            ("rpm_filter_min_hz".into(), "100".into()),
+            ("rpm_filter_q".into(), "500".into()),
+        ]);
+        let cfg = parse_rpm_filter(&h).unwrap();
+        assert_eq!(cfg.harmonics, 3);
+        assert_eq!(cfg.min_hz, 100.0);
+        assert_eq!(cfg.q, 5.0);
+    }
+
+    #[test]
+    fn sample_rate_empty_timestamps() {
+        let s = SampleRateEstimate::from_timestamps(&[]);
+        assert_eq!(s.rate_hz, 0.0);
+    }
+
+    #[test]
+    fn sample_rate_uniform_8khz() {
+        let times: Vec<u64> = (0..100).map(|i| i * 125).collect();
+        let s = SampleRateEstimate::from_timestamps(&times);
+        assert!((s.rate_hz - 8000.0).abs() < 1.0);
+        assert_eq!(s.median_dt, 125);
+        assert_eq!(s.jitter_std, 0.0);
+    }
+
+    #[test]
+    fn sample_rate_from_looptime_zero() {
+        let s = SampleRateEstimate::from_looptime(0);
+        assert_eq!(s.rate_hz, 0.0);
+    }
+
+    #[test]
+    fn field_indices_maps_gyro_channels() {
+        let names: Vec<String> = vec![
+            "gyroUnfilt[0]".into(),
+            "gyroUnfilt[1]".into(),
+            "gyroUnfilt[2]".into(),
+            "gyroADC[0]".into(),
+        ];
+        let idx = build_field_indices(&names);
+        assert_eq!(idx.raw_gyro, [Some(0), Some(1), Some(2)]);
+        assert_eq!(idx.gyro[0], Some(3));
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn bbl_log_count() {
+        let lf = LogFile::open(&fixture("eight_logs_in_one.bbl")).unwrap();
+        assert_eq!(lf.log_count(), 8);
+    }
+
+    #[test]
+    #[ignore]
+    fn bbl_all_logs_parse() {
+        let lf = LogFile::open(&fixture("eight_logs_in_one.bbl")).unwrap();
+        assert!(lf.parse_logs().is_ok());
+    }
+
+    #[test]
+    #[ignore]
+    fn bbl_metadata() {
+        let lf = LogFile::open(&fixture("eight_logs_in_one.bbl")).unwrap();
+        let log = lf.parse_log(0).unwrap();
+        assert_eq!(log.metadata.firmware, "Betaflight 4.5.1");
+        assert_eq!(log.metadata.board, "GEPR GEPRC_F722_AIO");
+        assert_eq!(log.metadata.file_name, "eight_logs_in_one.bbl");
+    }
+
+    #[test]
+    fn bbl_out_of_range() {
+        let lf = LogFile::open(&fixture("eight_logs_in_one.bbl")).unwrap();
+        let err = lf.parse_log(8).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidLogIndex { index: 8, count: 8 }
+        ));
+    }
+
+    #[test]
+    fn bfl_metadata() {
+        let lf = LogFile::open(&fixture("new202612_BF_steadyhover.BFL")).unwrap();
+        let log = lf.parse_log(0).unwrap();
+        assert_eq!(log.metadata.craft_name, "Mario 5");
+        assert_eq!(log.metadata.firmware, "Betaflight 2025.12.2");
+        assert_eq!(log.metadata.board, "SPBE SPEEDYBEEF7V3");
+    }
+
+    #[test]
+    fn bfl_duration_nonzero() {
+        let lf = LogFile::open(&fixture("new202612_BF_steadyhover.BFL")).unwrap();
+        let log = lf.parse_log(0).unwrap();
+        assert!(log.metadata.duration.as_secs() > 0);
     }
 }
