@@ -220,10 +220,8 @@ impl BlackbirdApp {
             };
             plot.show(ui);
 
-            filtered_visible[i] = plot.series[0].visible;
-            if let Some(raw_series) = plot.series.get(1) {
-                raw_visible[i] = raw_series.visible;
-            }
+            raw_visible[i] = plot.series[0].visible;
+            filtered_visible[i] = plot.series[1].visible;
         }
     }
 
