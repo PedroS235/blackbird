@@ -1,6 +1,10 @@
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, ColorImage, RichText, TextureOptions, Ui, Vec2};
+use egui_plot::{Line, Plot, PlotImage, PlotPoint, PlotPoints, Text, VLine};
+use elegance::Slider;
 
+use crate::analysis::SpectralAnalysis;
 use crate::parser::FlightData;
+use crate::signal::fft::BinnedSpectrum;
 
 use super::BlackbirdApp;
 use super::ui::timeseries_plot::{Series, TimeseriesPlot};
@@ -12,6 +16,8 @@ const VBAT_COLOR: Color32 = Color32::from_rgb(255, 202, 40);
 const CURRENT_COLOR: Color32 = Color32::from_rgb(255, 111, 97);
 const SETPOINT_COLOR: Color32 = Color32::WHITE;
 const RSSI_COLOR: Color32 = Color32::from_rgb(100, 200, 255);
+const PEAK_MARKER_COLOR: Color32 = Color32::from_rgb(255, 215, 0);
+const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum MainTab {
@@ -31,6 +37,14 @@ pub(super) enum TimeseriesTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum FilterAnalysisTab {
+    #[default]
+    Psd,
+    Frequency,
+    VsReference,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum PidAnalysisTab {
     #[default]
     GyroVsSetpoint,
@@ -45,9 +59,7 @@ impl BlackbirdApp {
 
             match self.main_tab {
                 MainTab::Timeseries => self.show_timeseries_tab(ui),
-                MainTab::FilterAnalysis => {
-                    ui.label("Filter Analysis - coming soon");
-                }
+                MainTab::FilterAnalysis => self.show_filter_analysis_tab(ui),
                 MainTab::PidAnalysis => self.show_pidanalysis_tab(ui),
                 MainTab::AutoTune => {
                     ui.label("Auto Tune - coming soon");
@@ -376,4 +388,313 @@ impl BlackbirdApp {
         plot.show(ui);
         *rssi_visible = plot.series[0].visible;
     }
+
+    fn show_filter_analysis_tab(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            for (tab, label) in [
+                (FilterAnalysisTab::Psd, "PSD"),
+                (FilterAnalysisTab::Frequency, "Frequency"),
+                (FilterAnalysisTab::VsReference, "Vs Reference"),
+            ] {
+                if ui
+                    .selectable_label(self.filteranalysis_tab == tab, label)
+                    .clicked()
+                {
+                    self.filteranalysis_tab = tab;
+                }
+            }
+        });
+        ui.add_space(4.0);
+
+        let Some(loaded) = self.logs.iter().find(|l| l.selected) else {
+            ui.label("No log selected");
+            return;
+        };
+        let Some(analysis) = loaded.analysis.get(loaded.active_sublog) else {
+            return;
+        };
+
+        match self.filteranalysis_tab {
+            FilterAnalysisTab::Psd => {
+                Self::show_psd_tab(ui, analysis, &mut self.psd_filtered_visible)
+            }
+            FilterAnalysisTab::Frequency => Self::show_frequency_tab(
+                ui,
+                analysis,
+                &mut self.psd_filtered_visible,
+                &mut self.frequency_peak_min_hz,
+            ),
+            FilterAnalysisTab::VsReference => {
+                Self::show_vs_reference_tab(ui, analysis, &mut self.heatmap_floor_db)
+            }
+        }
+    }
+
+    fn show_psd_tab(
+        ui: &mut egui::Ui,
+        analysis: &SpectralAnalysis,
+        filtered_visible: &mut [bool; 3],
+    ) {
+        let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
+
+        for i in 0..3 {
+            let Some(axis) = &analysis.axes[i] else {
+                continue;
+            };
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} psd", GYRO_AXIS_NAMES[i])).strong());
+                ui.checkbox(&mut filtered_visible[i], "show filtered");
+            });
+
+            Plot::new(format!("psd_plot_{}", GYRO_AXIS_NAMES[i]))
+                .height(plot_height)
+                .x_axis_label("Hz")
+                .y_axis_label("dB")
+                .show(ui, |plot_ui| {
+                    let raw_points: PlotPoints = axis
+                        .raw_psd
+                        .freq_hz
+                        .iter()
+                        .zip(&axis.raw_psd.power_db)
+                        .map(|(&f, &v)| [f, v])
+                        .collect();
+                    plot_ui.line(Line::new("raw", raw_points).color(GYRO_RAW_COLOR));
+
+                    if filtered_visible[i]
+                        && let Some(filtered_psd) = &axis.filtered_psd
+                    {
+                        let filtered_points: PlotPoints = filtered_psd
+                            .freq_hz
+                            .iter()
+                            .zip(&filtered_psd.power_db)
+                            .map(|(&f, &v)| [f, v])
+                            .collect();
+                        plot_ui.line(
+                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[i]),
+                        );
+                    }
+
+                    for marker in analysis
+                        .filter_markers
+                        .iter()
+                        .filter(|m| m.label.starts_with("Gyro"))
+                    {
+                        plot_ui.vline(
+                            VLine::new(marker.label.clone(), marker.center_hz as f64)
+                                .color(FILTER_MARKER_COLOR),
+                        );
+                    }
+
+                    for peak in &axis.peaks {
+                        let label = match peak.harmonic_of {
+                            Some(_) => format!("{:.0} Hz (harmonic)", peak.freq_hz),
+                            None => format!("{:.0} Hz", peak.freq_hz),
+                        };
+                        plot_ui.vline(
+                            VLine::new(label.clone(), peak.freq_hz).color(PEAK_MARKER_COLOR),
+                        );
+                        plot_ui.text(
+                            Text::new(
+                                format!("{label}_label"),
+                                PlotPoint::new(peak.freq_hz, peak.amplitude_db),
+                                label,
+                            )
+                            .color(PEAK_MARKER_COLOR)
+                            .anchor(egui::Align2::CENTER_BOTTOM),
+                        );
+                    }
+                });
+        }
+    }
+
+    /// Welch-averaged linear magnitude — no dB, chunked and averaged like the
+    /// PSD tab to smooth out the noise a single full-log FFT would show.
+    fn show_frequency_tab(
+        ui: &mut egui::Ui,
+        analysis: &SpectralAnalysis,
+        filtered_visible: &mut [bool; 3],
+        peak_min_hz: &mut f32,
+    ) {
+        let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
+
+        ui.add(
+            Slider::new(peak_min_hz, 0.0..=500.0)
+                .label("max search min Hz")
+                .suffix("Hz"),
+        );
+        ui.add_space(4.0);
+
+        for i in 0..3 {
+            let Some(axis) = &analysis.axes[i] else {
+                continue;
+            };
+            let raw_spectrum = &axis.raw_spectrum;
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} frequency", GYRO_AXIS_NAMES[i])).strong());
+                ui.checkbox(&mut filtered_visible[i], "show filtered");
+            });
+
+            Plot::new(format!("frequency_plot_{}", GYRO_AXIS_NAMES[i]))
+                .height(plot_height)
+                .x_axis_label("Hz")
+                .y_axis_label("magnitude")
+                .show(ui, |plot_ui| {
+                    let raw_points: PlotPoints = raw_spectrum
+                        .freq_hz
+                        .iter()
+                        .zip(&raw_spectrum.magnitude)
+                        .map(|(&f, &v)| [f, v])
+                        .collect();
+                    plot_ui.line(Line::new("raw", raw_points).color(GYRO_RAW_COLOR));
+
+                    if let Some((freq, mag)) = spectrum_peak(
+                        &raw_spectrum.freq_hz,
+                        &raw_spectrum.magnitude,
+                        *peak_min_hz as f64,
+                    ) {
+                        plot_ui.vline(VLine::new("max", freq).color(PEAK_MARKER_COLOR));
+                        plot_ui.text(
+                            Text::new(
+                                "max_label",
+                                PlotPoint::new(freq, mag),
+                                format!("{freq:.0} Hz"),
+                            )
+                            .color(PEAK_MARKER_COLOR)
+                            .anchor(egui::Align2::CENTER_BOTTOM),
+                        );
+                    }
+
+                    if filtered_visible[i]
+                        && let Some(filtered_spectrum) = &axis.filtered_spectrum
+                    {
+                        let filtered_points: PlotPoints = filtered_spectrum
+                            .freq_hz
+                            .iter()
+                            .zip(&filtered_spectrum.magnitude)
+                            .map(|(&f, &v)| [f, v])
+                            .collect();
+                        plot_ui.line(
+                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[i]),
+                        );
+                    }
+                });
+        }
+    }
+
+    fn show_vs_reference_tab(ui: &mut egui::Ui, analysis: &SpectralAnalysis, floor_db: &mut f32) {
+        ui.add(
+            Slider::new(floor_db, -120.0..=-5.0)
+                .label("sensitivity (noise floor dB)")
+                .suffix("dB"),
+        );
+        ui.add_space(4.0);
+
+        let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
+
+        for i in 0..3 {
+            let Some(axis) = &analysis.axes[i] else {
+                continue;
+            };
+            let Some(throttle_map) = &axis.throttle_map else {
+                continue;
+            };
+
+            ui.label(RichText::new(format!("{} vs throttle", GYRO_AXIS_NAMES[i])).strong());
+            Self::show_binned_heatmap(
+                ui,
+                &format!("throttle_heatmap_{}", GYRO_AXIS_NAMES[i]),
+                throttle_map,
+                "throttle",
+                plot_height,
+                *floor_db as f64,
+            );
+        }
+    }
+
+    /// `floor_db` is the noise floor, in dB relative to the map's peak (which
+    /// sits at 0dB) — the user-controlled "sensitivity" of the color scale.
+    /// Anything at or below it maps to the coldest color.
+    fn show_binned_heatmap(
+        ui: &mut egui::Ui,
+        id: &str,
+        spectrum: &BinnedSpectrum,
+        y_label: &str,
+        height: f32,
+        floor_db: f64,
+    ) {
+        let freq_count = spectrum.freq_hz.len();
+        let n_bins = spectrum.bin_centers.len();
+        if freq_count < 2 || n_bins == 0 {
+            ui.label("Not enough data");
+            return;
+        }
+
+        let db_range = (0.0 - floor_db).max(f64::MIN_POSITIVE);
+
+        // Texture rows run top-to-bottom, but plot y grows upward, so the highest
+        // bin goes in row 0 to line the image up with the plot's y axis.
+        let mut pixels = vec![Color32::TRANSPARENT; freq_count * n_bins];
+        for (bin, row) in spectrum.power_db.iter().enumerate() {
+            let y = n_bins - 1 - bin;
+            for (x, &v) in row.iter().enumerate() {
+                if v.is_finite() {
+                    pixels[y * freq_count + x] = heat_color(((v - floor_db) / db_range) as f32);
+                }
+            }
+        }
+        let texture = ui.ctx().load_texture(
+            id,
+            ColorImage::new([freq_count, n_bins], pixels),
+            TextureOptions::LINEAR,
+        );
+
+        let freq_min = spectrum.freq_hz[0];
+        let freq_max = spectrum.freq_hz[freq_count - 1];
+        let bin_width = if n_bins > 1 {
+            spectrum.bin_centers[1] - spectrum.bin_centers[0]
+        } else {
+            1.0
+        };
+        let y_min = spectrum.bin_centers[0] - bin_width / 2.0;
+        let y_max = spectrum.bin_centers[n_bins - 1] + bin_width / 2.0;
+
+        Plot::new(id)
+            .height(height)
+            .x_axis_label("Hz")
+            .y_axis_label(y_label)
+            .show(ui, |plot_ui| {
+                plot_ui.image(PlotImage::new(
+                    id,
+                    &texture,
+                    PlotPoint::new((freq_min + freq_max) / 2.0, (y_min + y_max) / 2.0),
+                    Vec2::new((freq_max - freq_min) as f32, (y_max - y_min) as f32),
+                ));
+            });
+    }
+}
+
+/// Highest-magnitude bin at or above `min_hz` — mirrors Betaflight's dynamic
+/// notch peak search, which ignores everything below its `min_hz` because that
+/// band is flight dynamics (stick input, prop wash), not motor/prop noise.
+fn spectrum_peak(freq_hz: &[f64], magnitude: &[f64], min_hz: f64) -> Option<(f64, f64)> {
+    freq_hz
+        .iter()
+        .zip(magnitude)
+        .filter(|&(&f, _)| f >= min_hz)
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(&f, &m)| (f, m))
+}
+
+fn heat_color(t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let (r, g, b) = if t < 0.5 {
+        let s = t * 2.0;
+        (0.0, s, 1.0 - s)
+    } else {
+        let s = (t - 0.5) * 2.0;
+        (s, 1.0 - s, 0.0)
+    };
+    Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }

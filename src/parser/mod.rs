@@ -1,5 +1,5 @@
 mod flight_data;
-mod metadata;
+pub mod metadata;
 mod sample_rate;
 
 pub use flight_data::FlightData;
@@ -135,7 +135,7 @@ fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metad
         .get("looptime")
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|&t| t > 0);
-    let rpm_filter = parse_rpm_filter(&raw_headers);
+    let filters = parse_filter_config(&raw_headers);
 
     Metadata {
         file_name: file_name.to_owned(),
@@ -144,9 +144,140 @@ fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metad
         board,
         looptime_us,
         duration: Duration::ZERO,
-        rpm_filter,
+        filters,
         raw_headers,
     }
+}
+
+fn parse_filter_config(h: &std::collections::HashMap<String, String>) -> metadata::FilterConfig {
+    metadata::FilterConfig {
+        gyro_lpf1: parse_lowpass(h, "gyro_lpf1_static_hz", "gyro_lpf1_dyn_hz", "gyro_lpf1_type"),
+        gyro_lpf2: parse_static_lowpass(h, "gyro_lpf2_static_hz", "gyro_lpf2_type"),
+        dterm_lpf1: parse_dterm_lpf1(h),
+        dterm_lpf2: parse_static_lowpass(h, "dterm_lpf2_static_hz", "dterm_lpf2_type"),
+        gyro_notches: parse_notches(h, "gyro_notch_hz", "gyro_notch_cutoff"),
+        dterm_notches: parse_notches(h, "dterm_notch_hz", "dterm_notch_cutoff"),
+        dyn_notch: parse_dyn_notch(h),
+        rpm_filter: parse_rpm_filter(h),
+    }
+}
+
+fn parse_filter_type(
+    h: &std::collections::HashMap<String, String>,
+    type_key: &str,
+) -> metadata::FilterType {
+    h.get(type_key)
+        .and_then(|v| v.trim().parse::<u8>().ok())
+        .map(metadata::FilterType::from_bf_code)
+        .unwrap_or_default()
+}
+
+fn parse_lowpass(
+    h: &std::collections::HashMap<String, String>,
+    static_key: &str,
+    dyn_key: &str,
+    type_key: &str,
+) -> Option<metadata::LowpassConfig> {
+    let static_hz = h
+        .get(static_key)
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    let (dyn_min_hz, dyn_max_hz) = h
+        .get(dyn_key)
+        .and_then(|v| {
+            let mut parts = v.split(',').filter_map(|s| s.trim().parse::<f32>().ok());
+            Some((parts.next()?, parts.next()?))
+        })
+        .unwrap_or((0.0, 0.0));
+
+    if static_hz == 0.0 && dyn_max_hz == 0.0 {
+        return None;
+    }
+    Some(metadata::LowpassConfig {
+        static_hz,
+        dyn_min_hz,
+        dyn_max_hz,
+        filter_type: parse_filter_type(h, type_key),
+    })
+}
+
+fn parse_static_lowpass(
+    h: &std::collections::HashMap<String, String>,
+    static_key: &str,
+    type_key: &str,
+) -> Option<metadata::StaticLowpassConfig> {
+    let cutoff_hz = h
+        .get(static_key)
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    if cutoff_hz == 0.0 {
+        return None;
+    }
+    Some(metadata::StaticLowpassConfig {
+        cutoff_hz,
+        filter_type: parse_filter_type(h, type_key),
+    })
+}
+
+fn parse_dterm_lpf1(
+    h: &std::collections::HashMap<String, String>,
+) -> Option<metadata::DtermLowpass1Config> {
+    let lowpass = parse_lowpass(h, "dterm_lpf1_static_hz", "dterm_lpf1_dyn_hz", "dterm_lpf1_type")?;
+    let dyn_expo = h
+        .get("dterm_lpf1_dyn_expo")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    Some(metadata::DtermLowpass1Config { lowpass, dyn_expo })
+}
+
+fn parse_notches(
+    h: &std::collections::HashMap<String, String>,
+    hz_key: &str,
+    cutoff_key: &str,
+) -> Vec<metadata::NotchConfig> {
+    let parse_list = |key: &str| -> Vec<f32> {
+        h.get(key)
+            .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    };
+
+    parse_list(hz_key)
+        .into_iter()
+        .zip(parse_list(cutoff_key))
+        .filter(|&(center_hz, _)| center_hz > 0.0)
+        .map(|(center_hz, cutoff_hz)| metadata::NotchConfig {
+            center_hz,
+            cutoff_hz,
+        })
+        .collect()
+}
+
+fn parse_dyn_notch(
+    h: &std::collections::HashMap<String, String>,
+) -> Option<metadata::DynNotchConfig> {
+    let count = h.get("dyn_notch_count")?.trim().parse::<u32>().ok()?;
+    if count == 0 {
+        return None;
+    }
+    let min_hz = h
+        .get("dyn_notch_min_hz")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(90.0);
+    let max_hz = h
+        .get("dyn_notch_max_hz")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(400.0);
+    let q = h
+        .get("dyn_notch_q")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map(|q100| q100 / 100.0)
+        .unwrap_or(3.0);
+    Some(metadata::DynNotchConfig {
+        min_hz,
+        max_hz,
+        count,
+        q,
+    })
 }
 
 fn parse_rpm_filter(

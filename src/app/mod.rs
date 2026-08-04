@@ -1,6 +1,7 @@
 mod mainview;
 mod notification;
 mod sidepanel;
+pub(crate) mod theme;
 mod ui;
 
 use std::{
@@ -11,8 +12,9 @@ use std::{
 use eframe::App;
 
 use crate::{
+    analysis::SpectralAnalysis,
     app::{
-        mainview::{MainTab, PidAnalysisTab, TimeseriesTab},
+        mainview::{FilterAnalysisTab, MainTab, PidAnalysisTab, TimeseriesTab},
         notification::Notification,
     },
     parser::{self, LogFile, ParsedLog},
@@ -28,9 +30,13 @@ pub struct BlackbirdApp {
     main_tab: MainTab,
     timeseries_tab: TimeseriesTab,
     pidanalysis_tab: PidAnalysisTab,
+    filteranalysis_tab: FilterAnalysisTab,
     gyro_filtered_visible: [bool; 3],
     gyro_raw_visible: [bool; 3],
     setpoint_visible: [bool; 3],
+    psd_filtered_visible: [bool; 3],
+    heatmap_floor_db: f32,
+    frequency_peak_min_hz: f32,
     vbat_visible: bool,
     current_visible: bool,
     rssi_visible: bool,
@@ -46,9 +52,13 @@ impl Default for BlackbirdApp {
             main_tab: MainTab::default(),
             timeseries_tab: TimeseriesTab::default(),
             pidanalysis_tab: PidAnalysisTab::default(),
+            filteranalysis_tab: FilterAnalysisTab::default(),
             gyro_filtered_visible: [true; 3],
             gyro_raw_visible: [true; 3],
             setpoint_visible: [true; 3],
+            psd_filtered_visible: [false; 3],
+            heatmap_floor_db: -60.0,
+            frequency_peak_min_hz: 100.0,
             vbat_visible: true,
             current_visible: true,
             rssi_visible: true,
@@ -192,9 +202,14 @@ impl BlackbirdApp {
                 tx.send(LoadEvent::Progress(log.file_name.clone())).ok();
                 match log.parse_logs() {
                     Ok(parsed) => {
+                        let noise_analyzer = crate::analysis::GyroNoiseAnalyzer::default();
+                        let analysis = parsed
+                            .iter()
+                            .map(|p| noise_analyzer.analyze(&p.flight_data, &p.metadata))
+                            .collect();
                         tx.send(LoadEvent::LogReady(LoadedLog {
                             log: parsed,
-                            analysis: None,
+                            analysis,
                             selected: true,
                             active_sublog: 0,
                         }))
@@ -209,12 +224,10 @@ impl BlackbirdApp {
     }
 }
 
-// Temporary Stub
-struct AnalysisResult;
-
 struct LoadedLog {
     log: Vec<ParsedLog>,
-    analysis: Option<AnalysisResult>,
+    /// One `SpectralAnalysis` per sublog in `log`, computed once at load time.
+    analysis: Vec<SpectralAnalysis>,
     selected: bool,
     active_sublog: usize,
 }

@@ -1,12 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-// mod analysis;
 mod app;
-mod logging;
-mod parser;
-mod signal;
 
-use crate::logging::init_logging;
+use blackbird::{analysis, logging, parser, signal};
+use logging::init_logging;
 
 fn main() {
     init_logging();
@@ -19,7 +16,10 @@ fn main() {
             .with_inner_size([1200.0, 800.0])
             .with_icon(icon),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+            surface: eframe::egui_wgpu::SurfaceConfig {
+                present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+                desired_maximum_frame_latency: None,
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -30,6 +30,7 @@ fn main() {
         options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            app::theme::install(&cc.egui_ctx);
             Ok(Box::<app::BlackbirdApp>::default())
         }),
     )

@@ -26,8 +26,9 @@ pub fn show(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
 
-            // Title row: file name left, checkbox right
+            // Title row: chart icon, file name left, checkbox right
             ui.horizontal(|ui| {
+                ui.label(RichText::new("📈").small());
                 // Cut the file name if it's too big
                 if metadata.file_name.len() > MAX_FILENAME_LEN {
                     ui.label(RichText::new(format!("{}...", &metadata.file_name[..30])).strong())

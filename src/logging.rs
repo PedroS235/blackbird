@@ -1,6 +1,6 @@
 use tracing_subscriber::EnvFilter;
 
-pub(crate) fn init_logging() {
+pub fn init_logging() {
     let default_level = if cfg!(debug_assertions) {
         "debug"
     } else {

@@ -1,166 +1,237 @@
-use rustfft::{FftPlanner, num_complex::Complex};
-use std::f64::consts::PI;
+use crate::parser::metadata::FilterConfig;
+use crate::parser::{FlightData, Metadata};
+use crate::signal::fft::{self, BinnedSpectrum, Psd, SignalAnalyzer, Spectrum};
 
-pub const N_THROTTLE_BINS: usize = 10;
-const WINDOW_SIZE: usize = 1600;
-const HOP: usize = 256;
+/// Runs PSD/peak/harmonic analysis on a gyro axis against its Betaflight
+/// filter config. Holds the detection thresholds so they're tunable per call
+/// site (e.g. a lower `peak_min_above_floor_db` for a noisier craft) instead
+/// of being buried as free-function constants.
+#[derive(Debug, Clone)]
+pub struct GyroNoiseAnalyzer {
+    pub throttle_bins: usize,
+    /// Peaks below this aren't reported — flight dynamics/stick input, not motor/prop noise.
+    pub peak_search_min_hz: f64,
+    /// Minimum prominence above the noise floor to count as a peak.
+    pub peak_min_above_floor_db: f64,
+    pub max_peaks: usize,
+    /// Tolerance (fraction of the harmonic index) for grouping a peak under a fundamental.
+    pub harmonic_tolerance: f64,
+}
 
-#[derive(Debug, Clone, Default)]
+impl Default for GyroNoiseAnalyzer {
+    fn default() -> Self {
+        Self {
+            throttle_bins: 10,
+            peak_search_min_hz: 30.0,
+            peak_min_above_floor_db: 6.0,
+            max_peaks: 8,
+            harmonic_tolerance: 0.05,
+        }
+    }
+}
+
+/// A local maximum in the raw PSD — candidate motor/prop noise.
+#[derive(Debug, Clone)]
 pub struct FrequencyPeak {
-    pub freq_hz: f32,
-    pub amplitude_db: f32,
+    pub freq_hz: f64,
+    pub amplitude_db: f64,
+    /// Index into the same `peaks` vec of the fundamental this is a multiple of.
+    pub harmonic_of: Option<usize>,
+    /// raw − filtered amplitude at this frequency; how much the current filter
+    /// config is already knocking it down. `None` if there's no filtered signal.
+    pub attenuated_db: Option<f64>,
+}
+
+/// A configured filter's position in the spectrum, for drawing over the PSD
+/// and for explaining "why" a peak looks the way it does.
+#[derive(Debug, Clone)]
+pub struct FilterMarker {
+    pub label: String,
+    pub center_hz: f32,
+    pub cutoff_hz: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
-pub struct SpectralResult {
-    pub noise_floor_db: f32,
+pub struct AxisSpectral {
+    pub raw_psd: Psd,
+    pub filtered_psd: Option<Psd>,
+    pub raw_spectrum: Spectrum,
+    pub filtered_spectrum: Option<Spectrum>,
+    pub throttle_map: Option<BinnedSpectrum>,
     pub peaks: Vec<FrequencyPeak>,
-    /// `[throttle_bin][freq_bin]` = amplitude in dB; NaN where bin has no samples.
-    pub throttle_map: Vec<Vec<f32>>,
-    /// Average spectrum across all throttle bins; index = freq bin, value = dB.
-    pub average_spectrum: Vec<f32>,
-    pub freq_resolution_hz: f32,
+    pub noise_floor_db: f64,
 }
 
-impl Default for SpectralResult {
-    fn default() -> Self {
-        Self {
-            noise_floor_db: 0.0,
-            peaks: Vec::new(),
-            throttle_map: vec![vec![]; N_THROTTLE_BINS],
-            average_spectrum: Vec::new(),
-            freq_resolution_hz: 1.0,
+#[derive(Debug, Clone, Default)]
+pub struct SpectralAnalysis {
+    pub axes: [Option<AxisSpectral>; 3],
+    /// Shared across axes — filter config is global, not per-axis.
+    pub filter_markers: Vec<FilterMarker>,
+}
+
+impl GyroNoiseAnalyzer {
+    pub fn analyze(&self, fd: &FlightData, metadata: &Metadata) -> SpectralAnalysis {
+        let fs = fd.sample_rate.rate_hz as f64;
+        let throttle = fd.rc_command[3].as_deref();
+
+        let axes = std::array::from_fn(|i| {
+            fd.raw_gyro[i]
+                .as_deref()
+                .map(|raw| self.analyze_axis(raw, fd.gyro[i].as_deref(), throttle, fs))
+        });
+
+        SpectralAnalysis {
+            axes,
+            filter_markers: Self::filter_markers(&metadata.filters),
         }
     }
-}
 
-pub fn compute_spectral(
-    signal: &[f64],
-    throttle: Option<&[f64]>,
-    sample_rate_hz: f32,
-) -> SpectralResult {
-    let n = signal.len();
-    if n < WINDOW_SIZE {
-        return SpectralResult::default();
+    fn analyze_axis(
+        &self,
+        raw: &[f64],
+        filtered: Option<&[f64]>,
+        throttle: Option<&[f64]>,
+        fs: f64,
+    ) -> AxisSpectral {
+        let window = fft::window_size_for(fs, raw.len());
+        let analyzer = SignalAnalyzer::new(fs, window, window / 2);
+
+        let raw_psd = analyzer.psd_welch(raw);
+        let raw_spectrum = analyzer.magnitude_welch(raw);
+        let filtered_psd = filtered.map(|f| analyzer.psd_welch(f));
+        let filtered_spectrum = filtered.map(|f| analyzer.magnitude_welch(f));
+        let throttle_map = throttle.map(|t| analyzer.psd_binned(raw, t, self.throttle_bins));
+
+        let noise_floor_db = median(&raw_psd.power_db);
+        let peaks = self.find_peaks(&raw_psd, filtered_psd.as_ref(), noise_floor_db);
+
+        AxisSpectral {
+            raw_psd,
+            filtered_psd,
+            raw_spectrum,
+            filtered_spectrum,
+            throttle_map,
+            peaks,
+            noise_floor_db,
+        }
     }
 
-    let n_freq = WINDOW_SIZE / 2 + 1;
-    let freq_resolution_hz = sample_rate_hz / WINDOW_SIZE as f32;
+    /// Top local maxima in the raw PSD above the noise floor, grouped into
+    /// harmonics of a lower-frequency fundamental where the ratio is near-integer.
+    fn find_peaks(
+        &self,
+        raw_psd: &Psd,
+        filtered_psd: Option<&Psd>,
+        floor_db: f64,
+    ) -> Vec<FrequencyPeak> {
+        let threshold = floor_db + self.peak_min_above_floor_db;
+        let mag = &raw_psd.power_db;
+        let freq = &raw_psd.freq_hz;
 
-    let hann: Vec<f64> = (0..WINDOW_SIZE)
-        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / (WINDOW_SIZE as f64 - 1.0)).cos()))
-        .collect();
-    let hann_power: f64 = hann.iter().map(|&w| w * w).sum::<f64>() / WINDOW_SIZE as f64;
+        let mut candidates: Vec<usize> = (1..mag.len().saturating_sub(1))
+            .filter(|&k| freq[k] >= self.peak_search_min_hz)
+            .filter(|&k| mag[k] > threshold && mag[k] > mag[k - 1] && mag[k] > mag[k + 1])
+            .collect();
 
-    let norm_throttle: Option<Vec<f64>> = throttle.map(|t| {
-        let (tmin, tmax) = t
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| {
-                (mn.min(v), mx.max(v))
-            });
-        let range = (tmax - tmin).max(1e-6);
-        t.iter()
-            .map(|&v| ((v - tmin) / range).clamp(0.0, 1.0))
-            .collect()
-    });
+        candidates.sort_by(|&a, &b| mag[b].total_cmp(&mag[a]));
+        candidates.truncate(self.max_peaks);
+        candidates.sort_by(|&a, &b| freq[a].total_cmp(&freq[b]));
 
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(WINDOW_SIZE);
-
-    let mut mag2_sum = vec![vec![0.0f64; n_freq]; N_THROTTLE_BINS];
-    let mut counts = vec![0usize; N_THROTTLE_BINS];
-    let mut buf = vec![Complex { re: 0.0f64, im: 0.0f64 }; WINDOW_SIZE];
-
-    let mut start = 0;
-    while start + WINDOW_SIZE <= n {
-        let mid = start + WINDOW_SIZE / 2;
-        let tbin = norm_throttle
-            .as_ref()
-            .map_or(0, |t| {
-                (t.get(mid).copied().unwrap_or(0.0) * N_THROTTLE_BINS as f64) as usize
+        let mut peaks: Vec<FrequencyPeak> = candidates
+            .into_iter()
+            .map(|k| FrequencyPeak {
+                freq_hz: freq[k],
+                amplitude_db: mag[k],
+                harmonic_of: None,
+                attenuated_db: filtered_psd
+                    .filter(|fp| k < fp.power_db.len())
+                    .map(|fp| mag[k] - fp.power_db[k]),
             })
-            .min(N_THROTTLE_BINS - 1);
+            .collect();
 
-        for (i, &s) in signal[start..start + WINDOW_SIZE].iter().enumerate() {
-            buf[i] = Complex { re: s * hann[i], im: 0.0 };
-        }
-        fft.process(&mut buf);
-
-        for k in 0..n_freq {
-            mag2_sum[tbin][k] += buf[k].norm_sqr() / (WINDOW_SIZE as f64 * hann_power);
-        }
-        counts[tbin] += 1;
-        start += HOP;
-    }
-
-    let throttle_map: Vec<Vec<f32>> = mag2_sum
-        .into_iter()
-        .zip(counts.iter())
-        .map(|(row, &cnt)| {
-            if cnt == 0 {
-                return vec![f32::NAN; n_freq];
+        for i in 0..peaks.len() {
+            let mut best: Option<(usize, f64)> = None;
+            for j in 0..i {
+                let ratio = peaks[i].freq_hz / peaks[j].freq_hz;
+                let n = ratio.round();
+                if n < 2.0 {
+                    continue;
+                }
+                let err = (ratio - n).abs() / n;
+                if err < self.harmonic_tolerance && best.is_none_or(|(_, best_err)| err < best_err)
+                {
+                    best = Some((j, err));
+                }
             }
-            row.iter()
-                .map(|&m| (20.0 * (m / cnt as f64).sqrt().max(1e-10).log10()) as f32)
-                .collect()
-        })
-        .collect();
+            peaks[i].harmonic_of = best.map(|(j, _)| j);
+        }
 
-    let mut overall = vec![0.0f32; n_freq];
-    let mut overall_cnt = 0usize;
-    for row in &throttle_map {
-        if row.first().map_or(true, |v| v.is_nan()) {
-            continue;
-        }
-        for (k, &v) in row.iter().enumerate() {
-            overall[k] += v;
-        }
-        overall_cnt += 1;
-    }
-    if overall_cnt > 0 {
-        for v in &mut overall {
-            *v /= overall_cnt as f32;
-        }
+        peaks
     }
 
-    let peak_db = overall
-        .iter()
-        .copied()
-        .filter(|v| v.is_finite())
-        .fold(f32::NEG_INFINITY, f32::max);
-    if peak_db.is_finite() {
-        for v in &mut overall {
-            if v.is_finite() {
-                *v -= peak_db;
-            }
+    fn filter_markers(cfg: &FilterConfig) -> Vec<FilterMarker> {
+        let mut markers = Vec::new();
+
+        if let Some(lpf) = &cfg.gyro_lpf1 {
+            markers.push(FilterMarker {
+                label: "Gyro LPF1".to_string(),
+                center_hz: lpf.cutoff_hz(),
+                cutoff_hz: Some(lpf.cutoff_hz()),
+            });
         }
+        if let Some(lpf) = &cfg.gyro_lpf2 {
+            markers.push(FilterMarker {
+                label: "Gyro LPF2".to_string(),
+                center_hz: lpf.cutoff_hz,
+                cutoff_hz: Some(lpf.cutoff_hz),
+            });
+        }
+        if let Some(lpf) = &cfg.dterm_lpf1 {
+            markers.push(FilterMarker {
+                label: "Dterm LPF1".to_string(),
+                center_hz: lpf.lowpass.cutoff_hz(),
+                cutoff_hz: Some(lpf.lowpass.cutoff_hz()),
+            });
+        }
+        if let Some(lpf) = &cfg.dterm_lpf2 {
+            markers.push(FilterMarker {
+                label: "Dterm LPF2".to_string(),
+                center_hz: lpf.cutoff_hz,
+                cutoff_hz: Some(lpf.cutoff_hz),
+            });
+        }
+
+        for (i, n) in cfg.gyro_notches.iter().enumerate() {
+            markers.push(FilterMarker {
+                label: format!("Gyro notch {}", i + 1),
+                center_hz: n.center_hz,
+                cutoff_hz: Some(n.cutoff_hz),
+            });
+        }
+        for (i, n) in cfg.dterm_notches.iter().enumerate() {
+            markers.push(FilterMarker {
+                label: format!("Dterm notch {}", i + 1),
+                center_hz: n.center_hz,
+                cutoff_hz: Some(n.cutoff_hz),
+            });
+        }
+        if let Some(dyn_notch) = &cfg.dyn_notch {
+            markers.push(FilterMarker {
+                label: "Dynamic notch range".to_string(),
+                center_hz: (dyn_notch.min_hz + dyn_notch.max_hz) / 2.0,
+                cutoff_hz: None,
+            });
+        }
+
+        markers
     }
+}
 
-    let noise_floor_db = overall
-        .iter()
-        .copied()
-        .filter(|v| v.is_finite())
-        .fold(f32::INFINITY, f32::min);
-    let threshold = noise_floor_db + 10.0;
-    let min_bin = (10.0 / freq_resolution_hz).ceil() as usize;
-
-    let mut peaks: Vec<FrequencyPeak> = (min_bin + 1..n_freq.saturating_sub(1))
-        .filter(|&k| {
-            overall[k] > threshold && overall[k] > overall[k - 1] && overall[k] > overall[k + 1]
-        })
-        .map(|k| FrequencyPeak {
-            freq_hz: k as f32 * freq_resolution_hz,
-            amplitude_db: overall[k],
-        })
-        .collect();
-    peaks.sort_by(|a, b| b.amplitude_db.partial_cmp(&a.amplitude_db).unwrap());
-    peaks.truncate(10);
-
-    SpectralResult {
-        noise_floor_db,
-        peaks,
-        throttle_map,
-        average_spectrum: overall,
-        freq_resolution_hz,
+fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
     }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
 }
