@@ -303,3 +303,15 @@ _(none yet — project is in initial setup)_
 - Ollama: which local model performs best for PID tuning diagnosis?
   Needs evaluation once milestone 2 data is available.
 - Settings persistence: `dirs` crate for platform config dir, or flat file next to binary?
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown — issues live under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` + `docs/adr/` at repo root (created lazily). See `docs/agents/domain.md`.

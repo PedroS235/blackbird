@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::parser::SampleRateEstimate;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FlightData {
     pub time_us: Arc<Vec<u64>>,
     pub sample_rate: SampleRateEstimate,

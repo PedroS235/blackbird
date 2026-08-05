@@ -3,6 +3,7 @@ name = "blackbird"
 version = "0.1.0"
 edition = "2024"
 
+
 [dependencies]
 anyhow = "1.0.102"
 blackbox-log = "0.4.3"
@@ -10,6 +11,7 @@ eframe = "0.35.0"
 egui = "0.35.0"
 egui-elegance = "0.14.0"
 egui_extras = { version = "0.35.0", features = ["image"] }
+egui-phosphor = "0.13.0"
 egui_plot = "0.36.0"
 rfd = "0.17.2"
 rustfft = "6.4.1"

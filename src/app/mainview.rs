@@ -5,6 +5,7 @@ use elegance::Slider;
 use crate::analysis::SpectralAnalysis;
 use crate::parser::FlightData;
 use crate::signal::fft::BinnedSpectrum;
+use crate::signal::timeseries::windowed_downsample;
 
 use super::BlackbirdApp;
 use super::ui::timeseries_plot::{Series, TimeseriesPlot};
@@ -42,6 +43,7 @@ pub(super) enum FilterAnalysisTab {
     Psd,
     Frequency,
     VsReference,
+    Spectrogram,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,10 +88,8 @@ impl BlackbirdApp {
     fn show_timeseries_tab(&mut self, ui: &mut egui::Ui) {
         let selected_fd = self
             .logs
-            .iter()
-            .find(|l| l.selected)
-            .and_then(|loaded| loaded.log.get(loaded.active_sublog))
-            .map(|parsed| &parsed.flight_data);
+            .current_flight()
+            .map(|(parsed, _)| &parsed.flight_data);
 
         let has_battery_data =
             selected_fd.is_some_and(|fd| fd.vbat.is_some() || fd.current.is_some());
@@ -120,29 +120,27 @@ impl BlackbirdApp {
         });
         ui.add_space(4.0);
 
-        let Some(loaded) = self.logs.iter().find(|l| l.selected) else {
+        let Some(fd) = selected_fd else {
             ui.label("No log selected");
             return;
         };
-        let Some(parsed) = loaded.log.get(loaded.active_sublog) else {
-            return;
-        };
-        let fd = &parsed.flight_data;
 
         match self.timeseries_tab {
             TimeseriesTab::Gyro => Self::show_gyro_plots(
                 ui,
                 fd,
-                &mut self.gyro_filtered_visible,
-                &mut self.gyro_raw_visible,
+                &mut self.view_state.timeseries.gyro_filtered_visible,
+                &mut self.view_state.timeseries.gyro_raw_visible,
             ),
             TimeseriesTab::PowerBattery => Self::show_power_battery_plots(
                 ui,
                 fd,
-                &mut self.vbat_visible,
-                &mut self.current_visible,
+                &mut self.view_state.timeseries.vbat_visible,
+                &mut self.view_state.timeseries.current_visible,
             ),
-            TimeseriesTab::Rssi => Self::show_rssi_plot(ui, fd, &mut self.rssi_visible),
+            TimeseriesTab::Rssi => {
+                Self::show_rssi_plot(ui, fd, &mut self.view_state.timeseries.rssi_visible)
+            }
         }
     }
 
@@ -159,11 +157,8 @@ impl BlackbirdApp {
             }
         });
         ui.add_space(4.0);
-        let Some(loaded) = self.logs.iter().find(|l| l.selected) else {
+        let Some((parsed, _)) = self.logs.current_flight() else {
             ui.label("No log selected");
-            return;
-        };
-        let Some(parsed) = loaded.log.get(loaded.active_sublog) else {
             return;
         };
         let fd = &parsed.flight_data;
@@ -172,8 +167,8 @@ impl BlackbirdApp {
             PidAnalysisTab::GyroVsSetpoint => Self::show_gyro_vs_setpoint_plots(
                 ui,
                 fd,
-                &mut self.gyro_filtered_visible,
-                &mut self.setpoint_visible,
+                &mut self.view_state.pid_analysis.gyro_filtered_visible,
+                &mut self.view_state.pid_analysis.setpoint_visible,
             ),
             PidAnalysisTab::StepResponse => {
                 ui.label("Step Response - coming soon");
@@ -390,11 +385,20 @@ impl BlackbirdApp {
     }
 
     fn show_filter_analysis_tab(&mut self, ui: &mut Ui) {
+        let Some((parsed, analysis)) = self.logs.current_flight() else {
+            ui.label("No log selected");
+            return;
+        };
+        let fd = &parsed.flight_data;
+        let has_dyn_notch_trace =
+            parsed.metadata.debug_mode == "FFT_FREQ" && fd.debug[0..3].iter().any(Option::is_some);
+
         ui.horizontal(|ui| {
             for (tab, label) in [
                 (FilterAnalysisTab::Psd, "PSD"),
                 (FilterAnalysisTab::Frequency, "Frequency"),
                 (FilterAnalysisTab::VsReference, "Vs Reference"),
+                (FilterAnalysisTab::Spectrogram, "Spectrogram"),
             ] {
                 if ui
                     .selectable_label(self.filteranalysis_tab == tab, label)
@@ -406,28 +410,155 @@ impl BlackbirdApp {
         });
         ui.add_space(4.0);
 
-        let Some(loaded) = self.logs.iter().find(|l| l.selected) else {
-            ui.label("No log selected");
-            return;
-        };
-        let Some(analysis) = loaded.analysis.get(loaded.active_sublog) else {
-            return;
-        };
-
         match self.filteranalysis_tab {
-            FilterAnalysisTab::Psd => {
-                Self::show_psd_tab(ui, analysis, &mut self.psd_filtered_visible)
-            }
+            FilterAnalysisTab::Psd => Self::show_psd_tab(
+                ui,
+                analysis,
+                &mut self.view_state.filter_analysis.psd_filtered_visible,
+            ),
             FilterAnalysisTab::Frequency => Self::show_frequency_tab(
                 ui,
                 analysis,
-                &mut self.psd_filtered_visible,
-                &mut self.frequency_peak_min_hz,
+                &mut self.view_state.filter_analysis.frequency_filtered_visible,
+                &mut self.view_state.filter_analysis.frequency_peak_min_hz,
             ),
-            FilterAnalysisTab::VsReference => {
-                Self::show_vs_reference_tab(ui, analysis, &mut self.heatmap_floor_db)
+            FilterAnalysisTab::VsReference => Self::show_vs_reference_tab(
+                ui,
+                analysis,
+                &mut self.view_state.filter_analysis.heatmap_floor_db,
+            ),
+            FilterAnalysisTab::Spectrogram => Self::show_spectrogram_tab(
+                ui,
+                analysis,
+                fd,
+                has_dyn_notch_trace,
+                &mut self.view_state.filter_analysis.spectrogram_floor_db,
+            ),
+        }
+    }
+
+    /// Per-axis time-vs-frequency waterfall (raw signal power binned by time
+    /// instead of throttle). When the log was recorded with debug mode
+    /// `FFT_FREQ`, overlays the dynamic notch tracker's live center frequency
+    /// (`debug[0..3]`) on top, so a mistracking or clamped tracker is visible
+    /// directly against the noise band it's supposed to be following.
+    fn show_spectrogram_tab(
+        ui: &mut egui::Ui,
+        analysis: &SpectralAnalysis,
+        fd: &FlightData,
+        has_dyn_notch_trace: bool,
+        floor_db: &mut f32,
+    ) {
+        ui.add(
+            Slider::new(floor_db, -120.0..=-5.0)
+                .label("sensitivity (noise floor dB)")
+                .suffix("dB"),
+        );
+        ui.add_space(4.0);
+
+        let t0 = fd.time_us.first().copied().unwrap_or(0);
+        let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
+
+        for i in 0..3 {
+            let Some(axis) = &analysis.axes[i] else {
+                continue;
+            };
+            let Some(time_map) = &axis.time_map else {
+                continue;
+            };
+
+            ui.label(RichText::new(format!("{} spectrogram", GYRO_AXIS_NAMES[i])).strong());
+            let overlay = has_dyn_notch_trace
+                .then(|| fd.debug[i].as_deref())
+                .flatten()
+                .map(|samples| (t0, fd.time_us.as_slice(), samples));
+            Self::show_time_heatmap(
+                ui,
+                &format!("spectrogram_{}", GYRO_AXIS_NAMES[i]),
+                time_map,
+                plot_height,
+                *floor_db as f64,
+                overlay,
+            );
+        }
+    }
+
+    /// Transposed variant of `show_binned_heatmap` — time on x, Hz on y — with
+    /// an optional tracked-frequency line overlaid in plot space.
+    fn show_time_heatmap(
+        ui: &mut egui::Ui,
+        id: &str,
+        spectrum: &BinnedSpectrum,
+        height: f32,
+        floor_db: f64,
+        overlay: Option<(u64, &[u64], &[f64])>,
+    ) {
+        let freq_count = spectrum.freq_hz.len();
+        let n_bins = spectrum.bin_centers.len();
+        if freq_count < 2 || n_bins == 0 {
+            ui.label("Not enough data");
+            return;
+        }
+
+        let db_range = (0.0 - floor_db).max(f64::MIN_POSITIVE);
+
+        // Texture rows run top-to-bottom, but plot y grows upward, so the highest
+        // frequency goes in row 0 to line the image up with the plot's y axis.
+        let mut pixels = vec![Color32::TRANSPARENT; n_bins * freq_count];
+        for (bin, row) in spectrum.power_db.iter().enumerate() {
+            for (freq_idx, &v) in row.iter().enumerate() {
+                if v.is_finite() {
+                    let y = freq_count - 1 - freq_idx;
+                    pixels[y * n_bins + bin] = heat_color(((v - floor_db) / db_range) as f32);
+                }
             }
         }
+        let texture = ui.ctx().load_texture(
+            id,
+            ColorImage::new([n_bins, freq_count], pixels),
+            TextureOptions::LINEAR,
+        );
+
+        let freq_min = spectrum.freq_hz[0];
+        let freq_max = spectrum.freq_hz[freq_count - 1];
+        let bin_width = if n_bins > 1 {
+            spectrum.bin_centers[1] - spectrum.bin_centers[0]
+        } else {
+            1.0
+        };
+        let t_min = spectrum.bin_centers[0] - bin_width / 2.0;
+        let t_max = spectrum.bin_centers[n_bins - 1] + bin_width / 2.0;
+
+        let bucket_count = (ui.available_width().max(1.0) as usize).max(1);
+
+        Plot::new(id)
+            .height(height)
+            .x_axis_label("s")
+            .y_axis_label("Hz")
+            .show(ui, |plot_ui| {
+                plot_ui.image(PlotImage::new(
+                    id,
+                    &texture,
+                    PlotPoint::new((t_min + t_max) / 2.0, (freq_min + freq_max) / 2.0),
+                    Vec2::new((t_max - t_min) as f32, (freq_max - freq_min) as f32),
+                ));
+
+                if let Some((t0, time_us, samples)) = overlay {
+                    let bounds = plot_ui.plot_bounds();
+                    let points = windowed_downsample(
+                        time_us,
+                        samples,
+                        t0,
+                        bounds.min()[0],
+                        bounds.max()[0],
+                        bucket_count,
+                    );
+                    plot_ui.line(
+                        Line::new("tracked center freq", PlotPoints::from(points))
+                            .color(Color32::WHITE),
+                    );
+                }
+            });
     }
 
     fn show_psd_tab(

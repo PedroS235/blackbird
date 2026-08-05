@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ParsedLog {
     pub metadata: Metadata,
     pub flight_data: FlightData,
@@ -136,6 +136,7 @@ fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metad
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|&t| t > 0);
     let filters = parse_filter_config(&raw_headers);
+    let debug_mode = headers.debug_mode().to_string();
 
     Metadata {
         file_name: file_name.to_owned(),
@@ -145,6 +146,7 @@ fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metad
         looptime_us,
         duration: Duration::ZERO,
         filters,
+        debug_mode,
         raw_headers,
     }
 }

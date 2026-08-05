@@ -470,6 +470,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-elegance",
+ "egui-phosphor",
  "egui_extras",
  "egui_plot",
  "rfd",
@@ -913,6 +914,15 @@ checksum = "2803ee2b5fba6eb984a339a714c2664b48dcf5406f26a634c2233db5ef31a415"
 dependencies = [
  "egui",
  "js-sys",
+]
+
+[[package]]
+name = "egui-phosphor"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "249826f9529c1757d71dbbb3a22ec101b21110ab663c45fb771c2b86121379e4"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

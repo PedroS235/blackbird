@@ -102,7 +102,7 @@ pub struct FilterConfig {
     pub rpm_filter: Option<RpmFilterConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub file_name: String,
     pub craft_name: String,
@@ -113,6 +113,8 @@ pub struct Metadata {
     /// Total flight duration, derived from first/last frame timestamp.
     pub duration: Duration,
     pub filters: FilterConfig,
+    /// Betaflight debug mode name (e.g. "FFT_FREQ"), or "NONE" if unset.
+    pub debug_mode: String,
     /// Passthrough for all non-standard headers (PIDs, filter settings, rates, etc.)
     pub raw_headers: HashMap<String, String>,
 }

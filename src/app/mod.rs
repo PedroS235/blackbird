@@ -1,45 +1,37 @@
+mod log_store;
 mod mainview;
 mod notification;
 mod sidepanel;
 pub(crate) mod theme;
 mod ui;
+mod view_state;
 
-use std::{
-    collections::VecDeque,
-    sync::mpsc::{self, Receiver},
-};
+use std::{collections::VecDeque, sync::mpsc};
 
 use eframe::App;
 
 use crate::{
-    analysis::SpectralAnalysis,
     app::{
+        log_store::{LoadEvent, LoadState, LoadedLog, LogStore},
         mainview::{FilterAnalysisTab, MainTab, PidAnalysisTab, TimeseriesTab},
         notification::Notification,
+        view_state::MainViewState,
     },
-    parser::{self, LogFile, ParsedLog},
+    parser::{self, LogFile},
 };
 
 const MAX_NOTIFICATIONS: usize = 50;
 
 pub struct BlackbirdApp {
     app_name: &'static str,
-    logs: Vec<LoadedLog>,
+    logs: LogStore,
     notifications: VecDeque<Notification>,
     load_state: LoadState,
     main_tab: MainTab,
     timeseries_tab: TimeseriesTab,
     pidanalysis_tab: PidAnalysisTab,
     filteranalysis_tab: FilterAnalysisTab,
-    gyro_filtered_visible: [bool; 3],
-    gyro_raw_visible: [bool; 3],
-    setpoint_visible: [bool; 3],
-    psd_filtered_visible: [bool; 3],
-    heatmap_floor_db: f32,
-    frequency_peak_min_hz: f32,
-    vbat_visible: bool,
-    current_visible: bool,
-    rssi_visible: bool,
+    view_state: MainViewState,
 }
 
 impl Default for BlackbirdApp {
@@ -53,15 +45,7 @@ impl Default for BlackbirdApp {
             timeseries_tab: TimeseriesTab::default(),
             pidanalysis_tab: PidAnalysisTab::default(),
             filteranalysis_tab: FilterAnalysisTab::default(),
-            gyro_filtered_visible: [true; 3],
-            gyro_raw_visible: [true; 3],
-            setpoint_visible: [true; 3],
-            psd_filtered_visible: [false; 3],
-            heatmap_floor_db: -60.0,
-            frequency_peak_min_hz: 100.0,
-            vbat_visible: true,
-            current_visible: true,
-            rssi_visible: true,
+            view_state: MainViewState::default(),
         }
     }
 }
@@ -210,7 +194,6 @@ impl BlackbirdApp {
                         tx.send(LoadEvent::LogReady(LoadedLog {
                             log: parsed,
                             analysis,
-                            selected: true,
                             active_sublog: 0,
                         }))
                         .ok();
@@ -222,28 +205,4 @@ impl BlackbirdApp {
             });
         });
     }
-}
-
-struct LoadedLog {
-    log: Vec<ParsedLog>,
-    /// One `SpectralAnalysis` per sublog in `log`, computed once at load time.
-    analysis: Vec<SpectralAnalysis>,
-    selected: bool,
-    active_sublog: usize,
-}
-
-enum LoadEvent {
-    Progress(String),
-    LogReady(LoadedLog),
-    Error(String),
-}
-
-enum LoadState {
-    Idle,
-    Loading {
-        rx: Receiver<LoadEvent>,
-        expected: usize,
-        loaded: usize,
-        current: String,
-    },
 }

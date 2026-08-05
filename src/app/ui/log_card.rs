@@ -7,9 +7,9 @@ pub fn show(
     ui: &mut egui::Ui,
     metadata: &Metadata,
     sublog_count: usize,
-    selected: &mut bool,
+    is_selected: bool,
     active_sublog: &mut usize,
-) {
+) -> bool {
     let looptime = metadata.looptime_us.unwrap_or(0) as f32;
     let hz = if looptime > 0.0 { 1e6 / looptime } else { 0.0 };
     let duration_s = metadata.duration.as_secs_f32();
@@ -17,6 +17,8 @@ pub fn show(
     let style = ui.style();
     let bg = style.visuals.widgets.noninteractive.bg_fill;
     let stroke = Stroke::new(1.0, style.visuals.widgets.noninteractive.bg_stroke.color);
+
+    let mut clicked = false;
 
     Frame::new()
         .fill(bg)
@@ -26,9 +28,9 @@ pub fn show(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
 
-            // Title row: chart icon, file name left, checkbox right
+            // Title row: chart icon, file name left, radio right
             ui.horizontal(|ui| {
-                ui.label(RichText::new("📈").small());
+                ui.label(RichText::new(egui_phosphor::regular::DATABASE));
                 // Cut the file name if it's too big
                 if metadata.file_name.len() > MAX_FILENAME_LEN {
                     ui.label(RichText::new(format!("{}...", &metadata.file_name[..30])).strong())
@@ -37,7 +39,9 @@ pub fn show(
                     ui.label(RichText::new(&metadata.file_name).strong());
                 }
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.checkbox(selected, "");
+                    if ui.radio(is_selected, "").clicked() {
+                        clicked = true;
+                    }
                 });
             });
 
@@ -69,4 +73,6 @@ pub fn show(
                 }
             }
         });
+
+    clicked
 }

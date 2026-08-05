@@ -49,18 +49,24 @@ impl BlackbirdApp {
                     egui::ScrollArea::vertical()
                         .id_salt("log_list")
                         .show(ui, |ui| {
-                            for loaded in &mut self.logs {
+                            let mut clicked = None;
+                            for (i, loaded, is_selected) in self.logs.iter_mut() {
                                 let sublog_count = loaded.log.len();
                                 let idx = loaded.active_sublog.min(sublog_count.saturating_sub(1));
                                 let metadata = &loaded.log[idx].metadata;
-                                ui::log_card::show(
+                                if ui::log_card::show(
                                     ui,
                                     metadata,
                                     sublog_count,
-                                    &mut loaded.selected,
+                                    is_selected,
                                     &mut loaded.active_sublog,
-                                );
+                                ) {
+                                    clicked = Some(i);
+                                }
                                 ui.add_space(4.0);
+                            }
+                            if let Some(i) = clicked {
+                                self.logs.select(i);
                             }
                         });
                 });

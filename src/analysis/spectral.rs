@@ -9,6 +9,7 @@ use crate::signal::fft::{self, BinnedSpectrum, Psd, SignalAnalyzer, Spectrum};
 #[derive(Debug, Clone)]
 pub struct GyroNoiseAnalyzer {
     pub throttle_bins: usize,
+    pub time_bins: usize,
     /// Peaks below this aren't reported — flight dynamics/stick input, not motor/prop noise.
     pub peak_search_min_hz: f64,
     /// Minimum prominence above the noise floor to count as a peak.
@@ -22,6 +23,7 @@ impl Default for GyroNoiseAnalyzer {
     fn default() -> Self {
         Self {
             throttle_bins: 10,
+            time_bins: 60,
             peak_search_min_hz: 30.0,
             peak_min_above_floor_db: 6.0,
             max_peaks: 8,
@@ -58,6 +60,8 @@ pub struct AxisSpectral {
     pub raw_spectrum: Spectrum,
     pub filtered_spectrum: Option<Spectrum>,
     pub throttle_map: Option<BinnedSpectrum>,
+    /// Raw-signal power binned by time instead of throttle — a spectrogram.
+    pub time_map: Option<BinnedSpectrum>,
     pub peaks: Vec<FrequencyPeak>,
     pub noise_floor_db: f64,
 }
@@ -73,11 +77,17 @@ impl GyroNoiseAnalyzer {
     pub fn analyze(&self, fd: &FlightData, metadata: &Metadata) -> SpectralAnalysis {
         let fs = fd.sample_rate.rate_hz as f64;
         let throttle = fd.rc_command[3].as_deref();
+        let t0 = fd.time_us.first().copied().unwrap_or(0);
+        let time_ref: Vec<f64> = fd
+            .time_us
+            .iter()
+            .map(|&t| t.saturating_sub(t0) as f64 / 1_000_000.0)
+            .collect();
 
         let axes = std::array::from_fn(|i| {
             fd.raw_gyro[i]
                 .as_deref()
-                .map(|raw| self.analyze_axis(raw, fd.gyro[i].as_deref(), throttle, fs))
+                .map(|raw| self.analyze_axis(raw, fd.gyro[i].as_deref(), throttle, &time_ref, fs))
         });
 
         SpectralAnalysis {
@@ -91,6 +101,7 @@ impl GyroNoiseAnalyzer {
         raw: &[f64],
         filtered: Option<&[f64]>,
         throttle: Option<&[f64]>,
+        time_ref: &[f64],
         fs: f64,
     ) -> AxisSpectral {
         let window = fft::window_size_for(fs, raw.len());
@@ -101,6 +112,8 @@ impl GyroNoiseAnalyzer {
         let filtered_psd = filtered.map(|f| analyzer.psd_welch(f));
         let filtered_spectrum = filtered.map(|f| analyzer.magnitude_welch(f));
         let throttle_map = throttle.map(|t| analyzer.psd_binned(raw, t, self.throttle_bins));
+        let time_map = (!time_ref.is_empty())
+            .then(|| analyzer.psd_binned(raw, time_ref, self.time_bins));
 
         let noise_floor_db = median(&raw_psd.power_db);
         let peaks = self.find_peaks(&raw_psd, filtered_psd.as_ref(), noise_floor_db);
@@ -111,6 +124,7 @@ impl GyroNoiseAnalyzer {
             raw_spectrum,
             filtered_spectrum,
             throttle_map,
+            time_map,
             peaks,
             noise_floor_db,
         }

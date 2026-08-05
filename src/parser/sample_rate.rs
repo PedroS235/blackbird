@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SampleRateEstimate {
     pub rate_hz: f32,
     pub median_dt: u64,
