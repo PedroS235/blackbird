@@ -153,7 +153,12 @@ fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metad
 
 fn parse_filter_config(h: &std::collections::HashMap<String, String>) -> metadata::FilterConfig {
     metadata::FilterConfig {
-        gyro_lpf1: parse_lowpass(h, "gyro_lpf1_static_hz", "gyro_lpf1_dyn_hz", "gyro_lpf1_type"),
+        gyro_lpf1: parse_lowpass(
+            h,
+            "gyro_lpf1_static_hz",
+            "gyro_lpf1_dyn_hz",
+            "gyro_lpf1_type",
+        ),
         gyro_lpf2: parse_static_lowpass(h, "gyro_lpf2_static_hz", "gyro_lpf2_type"),
         dterm_lpf1: parse_dterm_lpf1(h),
         dterm_lpf2: parse_static_lowpass(h, "dterm_lpf2_static_hz", "dterm_lpf2_type"),
@@ -224,7 +229,12 @@ fn parse_static_lowpass(
 fn parse_dterm_lpf1(
     h: &std::collections::HashMap<String, String>,
 ) -> Option<metadata::DtermLowpass1Config> {
-    let lowpass = parse_lowpass(h, "dterm_lpf1_static_hz", "dterm_lpf1_dyn_hz", "dterm_lpf1_type")?;
+    let lowpass = parse_lowpass(
+        h,
+        "dterm_lpf1_static_hz",
+        "dterm_lpf1_dyn_hz",
+        "dterm_lpf1_type",
+    )?;
     let dyn_expo = h
         .get("dterm_lpf1_dyn_expo")
         .and_then(|v| v.trim().parse::<f32>().ok())

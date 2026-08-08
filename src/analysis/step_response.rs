@@ -64,15 +64,23 @@ pub fn compute_step_response(
     let window = pre + post;
 
     if n < window + 2 * half + 1 {
-        return StepResponseResult { sample_rate_hz, pre_samples: pre, ..Default::default() };
+        return StepResponseResult {
+            sample_rate_hz,
+            pre_samples: pre,
+            ..Default::default()
+        };
     }
 
     let norm_throttle: Option<Vec<f64>> = throttle.map(|t| {
         let (tmin, tmax) = t
             .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| (mn.min(v), mx.max(v)));
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| {
+                (mn.min(v), mx.max(v))
+            });
         let range = (tmax - tmin).max(1e-6);
-        t.iter().map(|&v| ((v - tmin) / range).clamp(0.0, 1.0)).collect()
+        t.iter()
+            .map(|&v| ((v - tmin) / range).clamp(0.0, 1.0))
+            .collect()
     });
 
     let mut acc_pos = vec![0.0f64; window];
@@ -114,7 +122,9 @@ pub fn compute_step_response(
 
         let (pre_min, pre_max) = sp[..pre]
             .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| (mn.min(v), mx.max(v)));
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| {
+                (mn.min(v), mx.max(v))
+            });
         if pre_max - pre_min > STABILITY_THRESHOLD {
             continue;
         }
@@ -132,13 +142,19 @@ pub fn compute_step_response(
             continue;
         }
 
-        let tgt = if flip { baseline_sp - step_size } else { baseline_sp + step_size };
+        let tgt = if flip {
+            baseline_sp - step_size
+        } else {
+            baseline_sp + step_size
+        };
         let hold_tol = step_size * SUSTAIN_TOL;
 
         let sustain_start = pre + norm_samp;
         let sustain_end = (sustain_start + sustain_samp).min(window);
         if sustain_end > sustain_start
-            && !sp[sustain_start..sustain_end].iter().all(|&v| (v - tgt).abs() <= hold_tol)
+            && !sp[sustain_start..sustain_end]
+                .iter()
+                .all(|&v| (v - tgt).abs() <= hold_tol)
         {
             continue;
         }
@@ -174,7 +190,11 @@ pub fn compute_step_response(
 
     let count = count_pos + count_neg;
     if count == 0 {
-        return StepResponseResult { sample_rate_hz, pre_samples: pre, ..Default::default() };
+        return StepResponseResult {
+            sample_rate_hz,
+            pre_samples: pre,
+            ..Default::default()
+        };
     }
 
     let positive_curve_f64 = per_pos_avg(&acc_pos, &cnt_pos, count_pos);

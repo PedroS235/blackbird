@@ -244,7 +244,11 @@ fn freq_axis(sample_rate_hz: f64, window_size: usize) -> Vec<f64> {
 }
 
 fn peak_db(power: &[f64]) -> f64 {
-    10.0 * power.iter().cloned().fold(f64::MIN_POSITIVE, f64::max).log10()
+    10.0 * power
+        .iter()
+        .cloned()
+        .fold(f64::MIN_POSITIVE, f64::max)
+        .log10()
 }
 
 fn to_relative_db(power: &[f64], peak_db: f64) -> Vec<f64> {

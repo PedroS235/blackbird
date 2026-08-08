@@ -112,8 +112,8 @@ impl GyroNoiseAnalyzer {
         let filtered_psd = filtered.map(|f| analyzer.psd_welch(f));
         let filtered_spectrum = filtered.map(|f| analyzer.magnitude_welch(f));
         let throttle_map = throttle.map(|t| analyzer.psd_binned(raw, t, self.throttle_bins));
-        let time_map = (!time_ref.is_empty())
-            .then(|| analyzer.psd_binned(raw, time_ref, self.time_bins));
+        let time_map =
+            (!time_ref.is_empty()).then(|| analyzer.psd_binned(raw, time_ref, self.time_bins));
 
         let noise_floor_db = median(&raw_psd.power_db);
         let peaks = self.find_peaks(&raw_psd, filtered_psd.as_ref(), noise_floor_db);
