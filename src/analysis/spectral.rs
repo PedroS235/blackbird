@@ -108,13 +108,27 @@ impl GyroNoiseAnalyzer {
         let window = fft::window_size_for(fs, raw.len());
         let analyzer = SignalAnalyzer::new(fs, window, window / 2);
 
-        let raw_psd = analyzer.psd_welch(raw);
-        let raw_spectrum = analyzer.magnitude_welch(raw);
-        let filtered_psd = filtered.map(|f| analyzer.psd_welch(f));
-        let filtered_spectrum = filtered.map(|f| analyzer.magnitude_welch(f));
-        let throttle_map = throttle.map(|t| analyzer.psd_binned(raw, t, self.throttle_bins));
-        let time_map =
-            (!time_ref.is_empty()).then(|| analyzer.psd_binned(raw, time_ref, self.time_bins));
+        // One chunked pass over each signal; PSD, magnitude and both maps are
+        // derived from that pass's shared power array.
+        let mut raw_pass = analyzer.pass(raw);
+        if let Some(t) = throttle {
+            raw_pass = raw_pass.binned_by(t, self.throttle_bins);
+        }
+        if !time_ref.is_empty() {
+            raw_pass = raw_pass.binned_by(time_ref, self.time_bins);
+        }
+        let raw_view = raw_pass.run();
+        let filtered_view = filtered.map(|f| analyzer.pass(f).run());
+
+        let raw_psd = raw_view.psd();
+        let raw_spectrum = raw_view.magnitude();
+        let filtered_psd = filtered_view.as_ref().map(|v| v.psd());
+        let filtered_spectrum = filtered_view.as_ref().map(|v| v.magnitude());
+
+        // Same order the references were registered in above.
+        let mut maps = raw_view.into_binned().into_iter();
+        let throttle_map = throttle.and_then(|_| maps.next());
+        let time_map = maps.next();
 
         let noise_floor_db = median(&raw_psd.power_db);
         let peaks = self.find_peaks(&raw_psd, filtered_psd.as_ref(), noise_floor_db);
