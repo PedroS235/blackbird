@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use blackbird::analysis::NoStepResponse;
 use blackbird::loader::{CancelToken, LoadEvent, LoadedLog, LogLoader};
 use blackbird::parser::{Axis, LogFile};
 
@@ -178,7 +179,12 @@ fn a_hover_moves_the_sticks_too_little_for_a_step_response() {
     let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
     let step = &loaded.analysis[0].step;
 
-    assert!(Axis::ALL.iter().all(|&axis| step.axis(axis).is_none()));
+    assert!(Axis::ALL.iter().all(|&axis| {
+        step.axis(axis).unwrap_err()
+            == NoStepResponse::SticksTooStill {
+                min_setpoint_dps: 20.0,
+            }
+    }));
 }
 
 /// Same log, mask dropped to what a hover's stick jitter reaches: the

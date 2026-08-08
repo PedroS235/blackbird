@@ -2,7 +2,9 @@ pub mod spectral;
 pub mod step_response;
 
 pub use spectral::{GyroNoiseAnalyzer, SpectralAnalysis};
-pub use step_response::{StepResponseAnalysis, StepResponseAnalyzer};
+pub use step_response::{
+    AxisStepResponse, NoStepResponse, StepResponseAnalysis, StepResponseAnalyzer,
+};
 
 /// Everything computed from one sublog at load time. Bundled so a new
 /// analyser adds a field here rather than another `Vec` to the loader, the

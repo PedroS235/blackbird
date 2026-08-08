@@ -3,10 +3,6 @@ use std::sync::Arc;
 use crate::parser::{Axis, FlightData, PerAxis};
 use crate::signal::deconv::WienerDeconvolver;
 
-/// A normalised trace whose steady state is this close to zero carries no
-/// usable gain — dividing by it would blow the curve up instead of scaling it.
-const MIN_STEADY_STATE: f64 = 1e-3;
-
 /// Recovers the craft's step response by deconvolving gyro from setpoint over
 /// every overlapping window of the log, the way PIDToolbox and Blackbox
 /// Explorer do. Every part of the flight where the sticks moved contributes —
@@ -30,6 +26,9 @@ pub struct StepResponseAnalyzer {
     /// The stretch of the response averaged to find the steady state each
     /// trace is normalised against.
     pub tail_ms: f64,
+    /// A trace whose steady state is this close to zero carries no usable
+    /// gain — dividing by it would blow the curve up instead of scaling it.
+    pub min_steady_state: f64,
 }
 
 impl Default for StepResponseAnalyzer {
@@ -41,6 +40,7 @@ impl Default for StepResponseAnalyzer {
             min_setpoint_dps: 20.0,
             response_ms: 500.0,
             tail_ms: 100.0,
+            min_steady_state: 1e-3,
         }
     }
 }
@@ -56,73 +56,134 @@ pub struct AxisStepResponse {
     pub mean: Vec<f64>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// Why an axis has no step response. Each cause reads differently to a pilot —
+/// a field they never enabled, a flight that never asked the craft a question,
+/// a craft that never answered — so the analyser names the cause rather than
+/// leaving the panel to guess it back out of the flight data.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoStepResponse {
+    SetpointNotLogged,
+    GyroNotLogged,
+    /// Fewer samples than one window, or no usable sample rate.
+    LogTooShort,
+    /// No window cleared the stick mask, whose threshold this carries.
+    SticksTooStill {
+        min_setpoint_dps: f64,
+    },
+    /// The sticks moved but every response settled at ~0 — nothing to
+    /// normalise against, so nothing that can be plotted.
+    NoSteadyState,
+}
+
+#[derive(Debug, Clone)]
 pub struct StepResponseAnalysis {
-    axes: PerAxis<Option<AxisStepResponse>>,
-    /// The stick mask this run used, so the panel can explain an empty axis
-    /// with the threshold that actually rejected it.
-    pub min_setpoint_dps: f64,
+    axes: PerAxis<Result<AxisStepResponse, NoStepResponse>>,
+}
+
+impl Default for StepResponseAnalysis {
+    fn default() -> Self {
+        Self {
+            axes: PerAxis(Axis::ALL.map(|_| Err(NoStepResponse::SetpointNotLogged))),
+        }
+    }
 }
 
 impl StepResponseAnalysis {
-    /// `None` when the axis logged no `setpoint` or no `gyroADC`, when the log
-    /// is shorter than one window, or when no window passed the stick mask.
-    pub fn axis(&self, axis: Axis) -> Option<&AxisStepResponse> {
-        self.axes[axis].as_ref()
+    pub fn axis(&self, axis: Axis) -> Result<&AxisStepResponse, NoStepResponse> {
+        self.axes[axis].as_ref().map_err(|&reason| reason)
     }
+}
+
+/// The parts of a run that depend only on the sample rate. Built once per log
+/// so the FFT is planned once, not once per axis.
+struct Plan {
+    fs: f64,
+    window: usize,
+    hop: usize,
+    /// Samples of impulse response kept — the region the panel draws.
+    len: usize,
+    /// Samples averaged at the end of that region to find the steady state.
+    tail: usize,
+    deconvolver: WienerDeconvolver,
 }
 
 impl StepResponseAnalyzer {
     pub fn analyze(&self, fd: &FlightData) -> StepResponseAnalysis {
-        let fs = fd.sample_rate_hz();
+        let plan = self.plan(fd.sample_rate_hz());
 
         StepResponseAnalysis {
             axes: PerAxis(Axis::ALL.map(|axis| {
-                fd.setpoint(axis)
-                    .zip(fd.gyro(axis))
-                    .and_then(|(setpoint, gyro)| self.analyze_axis(setpoint, gyro, fs))
+                let setpoint = fd.setpoint(axis).ok_or(NoStepResponse::SetpointNotLogged)?;
+                let gyro = fd.gyro(axis).ok_or(NoStepResponse::GyroNotLogged)?;
+                let plan = plan.as_ref().ok_or(NoStepResponse::LogTooShort)?;
+
+                self.analyze_axis(plan, setpoint, gyro)
             })),
-            min_setpoint_dps: self.min_setpoint_dps,
         }
     }
 
-    fn analyze_axis(&self, setpoint: &[f64], gyro: &[f64], fs: f64) -> Option<AxisStepResponse> {
+    /// `None` when the log carries no usable sample rate, which leaves every
+    /// window length undefined.
+    fn plan(&self, fs: f64) -> Option<Plan> {
         if fs <= 0.0 {
             return None;
         }
         let samples = |seconds: f64| (seconds * fs).round() as usize;
         let window = samples(self.window_s).max(1);
-        let hop = samples(self.hop_s).max(1);
         let len = samples(self.response_ms / 1e3).clamp(1, window);
-        let tail = samples(self.tail_ms / 1e3).clamp(1, len);
 
-        let last_start = setpoint.len().min(gyro.len()).checked_sub(window)?;
-        let deconvolver = WienerDeconvolver::new(window, self.lambda_k);
+        Some(Plan {
+            fs,
+            hop: samples(self.hop_s).max(1),
+            tail: samples(self.tail_ms / 1e3).clamp(1, len),
+            deconvolver: WienerDeconvolver::new(window, self.lambda_k),
+            window,
+            len,
+        })
+    }
+
+    fn analyze_axis(
+        &self,
+        plan: &Plan,
+        setpoint: &[f64],
+        gyro: &[f64],
+    ) -> Result<AxisStepResponse, NoStepResponse> {
+        let last_start = setpoint
+            .len()
+            .min(gyro.len())
+            .checked_sub(plan.window)
+            .ok_or(NoStepResponse::LogTooShort)?;
+
+        // Whether anything got past the stick mask decides which empty state
+        // the panel shows: a still flight reads nothing like a dead gyro.
+        let mut sticks_moved = false;
 
         let traces: Vec<Vec<f64>> = (0..=last_start)
-            .step_by(hop)
+            .step_by(plan.hop)
             .filter_map(|start| {
-                let sp = &setpoint[start..start + window];
+                let sp = &setpoint[start..start + plan.window];
                 if sp.iter().fold(0.0, |m: f64, v| m.max(v.abs())) < self.min_setpoint_dps {
                     return None;
                 }
+                sticks_moved = true;
 
                 // The step response is the cumulative sum of the impulse
                 // response, truncated to the region the panel draws.
-                let mut step: Vec<f64> = deconvolver
-                    .impulse_response(sp, &gyro[start..start + window])
+                let mut step: Vec<f64> = plan
+                    .deconvolver
+                    .impulse_response(sp, &gyro[start..start + plan.window])
                     .iter()
                     .scan(0.0, |acc, &h| {
                         *acc += h;
                         Some(*acc)
                     })
-                    .take(len)
+                    .take(plan.len)
                     .collect();
 
                 // Per-trace normalisation: without it a single drifting trace
                 // shifts the mean and overshoot stops meaning anything.
-                let steady = step[len - tail..].iter().sum::<f64>() / tail as f64;
-                if steady.abs() < MIN_STEADY_STATE {
+                let steady = step[plan.len - plan.tail..].iter().sum::<f64>() / plan.tail as f64;
+                if steady.abs() < self.min_steady_state {
                     return None;
                 }
                 step.iter_mut().for_each(|v| *v /= steady);
@@ -131,15 +192,20 @@ impl StepResponseAnalyzer {
             .collect();
 
         if traces.is_empty() {
-            return None;
+            return Err(match sticks_moved {
+                true => NoStepResponse::NoSteadyState,
+                false => NoStepResponse::SticksTooStill {
+                    min_setpoint_dps: self.min_setpoint_dps,
+                },
+            });
         }
 
-        let mean = (0..len)
+        let mean = (0..plan.len)
             .map(|i| traces.iter().map(|t| t[i]).sum::<f64>() / traces.len() as f64)
             .collect();
 
-        Some(AxisStepResponse {
-            time_ms: (0..len).map(|i| i as f64 * 1e3 / fs).collect(),
+        Ok(AxisStepResponse {
+            time_ms: (0..plan.len).map(|i| i as f64 * 1e3 / plan.fs).collect(),
             traces,
             mean,
         })
@@ -230,49 +296,66 @@ mod test {
         assert_eq!(roll.mean.len(), roll.time_ms.len());
     }
 
-    /// A hover with the sticks parked is not a step response, and saying so is
-    /// different from the axis never having been logged.
+    /// A hover with the sticks parked is not a step response, and the reason
+    /// has to survive to the panel: this is not the same as an unlogged axis.
     #[test]
-    fn sticks_that_never_move_yield_no_axis() {
+    fn sticks_that_never_move_name_the_threshold_that_rejected_them() {
         let setpoint = vec![0.5; 12_000];
         let gyro = second_order(&setpoint, 20.0, 0.4);
 
         let analysis = StepResponseAnalyzer::default().analyze(&log_with(setpoint, gyro));
 
-        assert!(analysis.axis(Axis::Roll).is_none());
+        assert_eq!(
+            analysis.axis(Axis::Roll).unwrap_err(),
+            NoStepResponse::SticksTooStill {
+                min_setpoint_dps: 20.0
+            }
+        );
     }
 
     #[test]
-    fn axes_without_setpoint_or_gyro_are_not_analysed() {
+    fn axes_without_setpoint_or_gyro_say_which_field_is_missing() {
         let setpoint = stick_input(24_000, 200.0);
         let gyro = second_order(&setpoint, 20.0, 0.4);
-        let analysis = StepResponseAnalyzer::default().analyze(&log_with(setpoint, gyro));
+        let log = log_with(setpoint, gyro).with_channel(Channel::Setpoint(Axis::Pitch), vec![0.0]);
 
-        assert!(analysis.axis(Axis::Pitch).is_none());
-        assert!(analysis.axis(Axis::Yaw).is_none());
+        let analysis = StepResponseAnalyzer::default().analyze(&log);
+
+        assert_eq!(
+            analysis.axis(Axis::Pitch).unwrap_err(),
+            NoStepResponse::GyroNotLogged
+        );
+        assert_eq!(
+            analysis.axis(Axis::Yaw).unwrap_err(),
+            NoStepResponse::SetpointNotLogged
+        );
     }
 
     #[test]
-    fn a_log_shorter_than_one_window_is_empty_not_a_panic() {
+    fn a_log_shorter_than_one_window_says_so_rather_than_blaming_the_pilot() {
         let setpoint = stick_input(500, 200.0);
         let gyro = second_order(&setpoint, 20.0, 0.4);
 
         let analysis = StepResponseAnalyzer::default().analyze(&log_with(setpoint, gyro));
 
-        assert!(analysis.axis(Axis::Roll).is_none());
+        assert_eq!(
+            analysis.axis(Axis::Roll).unwrap_err(),
+            NoStepResponse::LogTooShort
+        );
     }
 
-    /// A gyro that never responded leaves a steady state of ~0 to divide by.
+    /// A gyro that never responded leaves a steady state of ~0 to divide by —
+    /// which is a different story from sticks that never moved.
     #[test]
-    fn a_dead_gyro_produces_no_infinities() {
+    fn a_dead_gyro_is_reported_as_such_not_as_infinities() {
         let setpoint = stick_input(24_000, 200.0);
         let analysis =
             StepResponseAnalyzer::default().analyze(&log_with(setpoint, vec![0.0; 24_000]));
 
-        let finite = analysis
-            .axis(Axis::Roll)
-            .is_none_or(|roll| roll.mean.iter().all(|v| v.is_finite()));
-        assert!(finite, "no NaN or inf in the mean curve");
+        assert_eq!(
+            analysis.axis(Axis::Roll).unwrap_err(),
+            NoStepResponse::NoSteadyState
+        );
     }
 
     /// The mask is a threshold, not a fixed rule — a gentle cinematic log is
@@ -287,7 +370,7 @@ mod test {
             StepResponseAnalyzer::default()
                 .analyze(&log)
                 .axis(Axis::Roll)
-                .is_none()
+                .is_err()
         );
         assert!(
             StepResponseAnalyzer {
@@ -296,7 +379,7 @@ mod test {
             }
             .analyze(&log)
             .axis(Axis::Roll)
-            .is_some()
+            .is_ok()
         );
     }
 }

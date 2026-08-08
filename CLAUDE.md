@@ -68,7 +68,7 @@ src/
 ├── analysis/
 │   ├── mod.rs               ← AnalysisResult struct, orchestrates the three analysers
 │   ├── spectral.rs          ← FFT, Hann windowing, throttle-binned spectral analysis
-│   ├── step_response.rs     ← step detection, window averaging, shape metrics
+│   ├── step_response.rs     ← Wiener deconvolution, windowing, averaging
 │   └── filter_delay.rs      ← cross-correlation, delay estimation in ms
 │
 ├── ai/
@@ -137,7 +137,7 @@ The AI never sees raw timeseries — only computed metrics.
 ```rust
 pub struct AnalysisResult {
     pub spectral:      [SpectralResult; 3],     // per axis: roll, pitch, yaw
-    pub step_response: [StepResponseResult; 3],
+    pub step_response: StepResponseAnalysis,   // per axis, see below
     pub filter_delay:  FilterDelayResult,
 }
 
@@ -147,11 +147,13 @@ pub struct SpectralResult {
     pub throttle_map: ndarray::Array2<f32>,     // throttle_bin × freq → dB
 }
 
-pub struct StepResponseResult {
-    pub curve: Vec<f32>,                        // normalised averaged response
-    pub overshoot_pct: f32,
-    pub settling_time_ms: f32,
-    pub step_count: usize,                      // how many steps were averaged
+// Implemented as `analysis::step_response::AxisStepResponse`. Overshoot,
+// rise and settling metrics are deferred until the curve has been checked
+// against real logs.
+pub struct AxisStepResponse {
+    pub time_ms: Arc<[f64]>,                    // shared across traces
+    pub traces: Vec<Vec<f64>>,                  // one per surviving window
+    pub mean: Vec<f64>,                         // pointwise average of them all
 }
 
 pub struct FilterDelayResult {
@@ -173,11 +175,23 @@ pub struct FilterDelayResult {
 
 ### Step response
 
-- Detect steps in `rcCommand`: change > 200 units in < 10ms
-- Extract window: 500ms around each detected step
-- Normalise each window to unit step magnitude
-- Average all windows — cancels noise, isolates systematic response
-- Input: `rcCommand` for detection, `gyroADC` (filtered) for response
+Wiener deconvolution, not step detection: real freestyle logs contain almost no
+isolated, sustained stick steps, so a detector finds nothing or averages a
+handful of unrepresentative events. Deconvolution uses every part of the flight
+where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer.
+
+- Per overlapping window (2 s, hopping 0.25 s): FFT the setpoint and the gyro,
+  zero-padded so the convolution is linear rather than circular
+- `H = (G · conj(S)) / (|S|² + λ)`, `λ = 0.01 · mean(|S|²)` — λ regularises the
+  frequencies where the setpoint carried no energy
+- IFFT → impulse response; cumulative sum → step response; truncate to 500 ms
+- Normalise each trace by the mean of its last 100 ms, so one drifting trace
+  cannot shift the average
+- Reject windows where `max |setpoint| < 20 deg/s`; no throttle gating
+- Input: `setpoint` (logged field only — reconstructing it from `rcCommand`
+  needs rates the metadata does not carry) and `gyroADC` (filtered), which is
+  what the PID loop saw, so filter delay belongs in the measured response
+- Traces are kept individually as well as averaged — the spread is diagnostic
 
 ### Filter delay
 
@@ -255,7 +269,7 @@ Goal: load a log, see the data. Validate the full parser → UI pipeline.
 ### Milestone 2 — Analysis
 
 - [ ] `analysis/spectral.rs` — FFT + throttle heatmap
-- [ ] `analysis/step_response.rs` — step detection + averaging
+- [x] `analysis/step_response.rs` — Wiener deconvolution + averaging
 - [ ] `analysis/filter_delay.rs` — cross-correlation delay
 - [ ] Corresponding UI panels
 

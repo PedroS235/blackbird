@@ -1,7 +1,7 @@
 use egui::{Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotPoints};
 
-use crate::analysis::step_response::AxisStepResponse;
+use crate::analysis::{AxisStepResponse, NoStepResponse};
 use crate::app::tabs::{GYRO_AXIS_COLORS, TabCtx, stacked_plot_height};
 use crate::parser::Axis;
 
@@ -36,14 +36,20 @@ impl StepResponse {
         ui.checkbox(&mut self.show_individual, "show individual responses");
         ui.add_space(4.0);
 
-        let plot_height = stacked_plot_height(ui, 3);
+        // Only the axes that draw share the height: a craft logging one axis
+        // gets a full-size plot, not a third of the panel and two dead gaps.
+        let drawn = Axis::ALL
+            .iter()
+            .filter(|&&a| ctx.analysis.step.axis(a).is_ok())
+            .count();
+        let plot_height = stacked_plot_height(ui, drawn);
 
         for axis in Axis::ALL {
             match ctx.analysis.step.axis(axis) {
-                Some(response) => self.show_axis(ui, axis, response, plot_height),
-                None => {
+                Ok(response) => self.show_axis(ui, axis, response, plot_height),
+                Err(reason) => {
                     ui.label(RichText::new(axis.name()).strong());
-                    ui.label(self.empty_reason(ctx, axis));
+                    ui.label(explain(axis, reason));
                     ui.add_space(8.0);
                 }
             }
@@ -95,31 +101,34 @@ impl StepResponse {
                 );
             });
     }
+}
 
-    /// An empty axis is never silently blank: either the field was not logged,
-    /// or the flying itself never asked the craft a question.
-    fn empty_reason(&self, ctx: &TabCtx<'_>, axis: Axis) -> String {
-        let mask = ctx.analysis.step.min_setpoint_dps;
+/// An empty axis is never silently blank — the analyser says which of its
+/// exits was taken and this turns that into something a pilot can act on.
+fn explain(axis: Axis, reason: NoStepResponse) -> String {
+    let i = axis.index();
 
-        if ctx.flight.setpoint(axis).is_none() {
-            format!(
-                "No setpoint[{}] in this log — the step response is gyro deconvolved from \
-                 setpoint, so there is nothing to compare against. Enable the Setpoint debug \
-                 field in Betaflight's Blackbox tab and fly again.",
-                axis.index()
-            )
-        } else if ctx.flight.gyro(axis).is_none() {
-            format!(
-                "No gyroADC[{}] in this log — nothing recorded how the craft answered the \
-                 sticks.",
-                axis.index()
-            )
-        } else {
-            format!(
-                "The sticks never moved more than {mask:.0} deg/s on this axis in any \
-                 analysed window. Fly some rolls, flips or hard direction changes and the \
-                 step response will have something to work from."
-            )
+    match reason {
+        NoStepResponse::SetpointNotLogged => format!(
+            "No setpoint[{i}] in this log — the step response is gyro deconvolved from \
+             setpoint, so there is nothing to compare against. Enable the Setpoint field \
+             in Betaflight's Blackbox tab and fly again."
+        ),
+        NoStepResponse::GyroNotLogged => format!(
+            "No gyroADC[{i}] in this log — nothing recorded how the craft answered the sticks."
+        ),
+        NoStepResponse::LogTooShort => {
+            "This log is shorter than one analysis window. Fly for a few seconds longer."
+                .to_string()
         }
+        NoStepResponse::SticksTooStill { min_setpoint_dps } => format!(
+            "The sticks never moved more than {min_setpoint_dps:.0} deg/s on this axis. Fly \
+             some rolls, flips or hard direction changes and the step response will have \
+             something to work from."
+        ),
+        NoStepResponse::NoSteadyState => format!(
+            "The sticks moved but gyro axis {i} never settled anywhere — check that the \
+             craft was armed and flying for this log."
+        ),
     }
 }
