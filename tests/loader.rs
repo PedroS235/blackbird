@@ -170,3 +170,32 @@ fn multi_log_file_reports_each_sublog() {
 
     assert_eq!(sublogs, (0..8).collect::<Vec<_>>());
 }
+
+/// The hover fixture logs `setpoint`, but the pilot is holding position — no
+/// window clears the 20 deg/s stick mask, so every axis is legitimately empty.
+#[test]
+fn a_hover_moves_the_sticks_too_little_for_a_step_response() {
+    let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let step = &loaded.analysis[0].step;
+
+    assert!(Axis::ALL.iter().all(|&axis| step.axis(axis).is_none()));
+}
+
+/// Same log, mask dropped to what a hover's stick jitter reaches: the
+/// deconvolution runs end to end and lands traces on a real flight.
+#[test]
+fn dropping_the_stick_mask_recovers_traces_from_the_hover() {
+    let mut loader = LogLoader::default();
+    loader.step_response.min_setpoint_dps = 1.0;
+
+    let loaded = ready(load(&loader, "new202612_BF_steadyhover.BFL"));
+    let roll = loaded.analysis[0]
+        .step
+        .axis(Axis::Roll)
+        .expect("roll traces");
+
+    assert!(!roll.traces.is_empty());
+    assert_eq!(roll.mean.len(), roll.time_ms.len());
+    assert!(roll.mean.iter().all(|v| v.is_finite()));
+    assert!(roll.traces.iter().all(|t| t.len() == roll.mean.len()));
+}

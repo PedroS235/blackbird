@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use crate::analysis::{Analysis, GyroNoiseAnalyzer};
+use crate::analysis::{Analysis, GyroNoiseAnalyzer, StepResponseAnalyzer};
 use crate::parser::{LogFile, ParseError, ParsedLog};
 
 /// One file's sublogs, each with its analysis computed at load time.
@@ -83,6 +83,7 @@ impl CancelToken {
 #[derive(Debug, Clone, Default)]
 pub struct LogLoader {
     pub analyzer: GyroNoiseAnalyzer,
+    pub step_response: StepResponseAnalyzer,
 }
 
 impl LogLoader {
@@ -90,6 +91,7 @@ impl LogLoader {
     fn analyse(&self, parsed: &ParsedLog) -> Analysis {
         Analysis {
             spectral: self.analyzer.analyze(&parsed.flight_data, &parsed.metadata),
+            step: self.step_response.analyze(&parsed.flight_data),
         }
     }
 
