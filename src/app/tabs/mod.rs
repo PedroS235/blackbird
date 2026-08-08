@@ -4,7 +4,7 @@ mod timeseries;
 
 use egui::{Color32, Ui};
 
-use crate::analysis::SpectralAnalysis;
+use crate::analysis::Analysis;
 use crate::parser::{FlightData, Metadata, ParsedLog, PerAxis};
 
 use filter_analysis::FilterAnalysis;
@@ -20,7 +20,7 @@ pub(super) const GYRO_RAW_COLOR: Color32 = Color32::GRAY;
 /// is added.
 pub(super) struct TabCtx<'a> {
     pub(super) flight: &'a FlightData,
-    pub(super) analysis: &'a SpectralAnalysis,
+    pub(super) analysis: &'a Analysis,
     pub(super) metadata: &'a Metadata,
 }
 
@@ -45,7 +45,7 @@ pub(super) struct Tabs {
 impl Tabs {
     /// Resolves the selected log once so that nothing below here sees an
     /// `Option`, and no tab re-implements the empty case.
-    pub(super) fn show(&mut self, ui: &mut Ui, flight: Option<(&ParsedLog, &SpectralAnalysis)>) {
+    pub(super) fn show(&mut self, ui: &mut Ui, flight: Option<(&ParsedLog, &Analysis)>) {
         egui::CentralPanel::default().show(ui, |ui| {
             self.show_tab_bar(ui);
             ui.separator();

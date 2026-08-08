@@ -66,7 +66,7 @@ fn single_log_file_emits_progress_then_ready() {
 #[test]
 fn analysis_runs_at_load_time() {
     let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
-    let spectral = &loaded.analysis[0];
+    let spectral = &loaded.analysis[0].spectral;
     assert!(spectral.axis(Axis::Roll).is_some());
 }
 
@@ -78,7 +78,7 @@ fn analysis_knobs_reach_the_analyzer() {
     loader.analyzer.peak_min_above_floor_db = 1_000.0;
 
     let loaded = ready(load(&loader, "new202612_BF_steadyhover.BFL"));
-    let roll = loaded.analysis[0].axis(Axis::Roll).unwrap();
+    let roll = loaded.analysis[0].spectral.axis(Axis::Roll).unwrap();
     assert!(roll.peaks.is_empty());
 }
 

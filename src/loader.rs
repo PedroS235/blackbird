@@ -9,16 +9,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use crate::analysis::{GyroNoiseAnalyzer, SpectralAnalysis};
+use crate::analysis::{Analysis, GyroNoiseAnalyzer};
 use crate::parser::{LogFile, ParseError, ParsedLog};
 
-/// One file's sublogs, each with the spectral analysis computed at load time.
+/// One file's sublogs, each with its analysis computed at load time.
 #[derive(Debug, Default)]
 pub struct LoadedLog {
     pub file_name: String,
     pub logs: Vec<ParsedLog>,
     /// One entry per sublog in `logs`, same order.
-    pub analysis: Vec<SpectralAnalysis>,
+    pub analysis: Vec<Analysis>,
 }
 
 #[derive(Debug)]
@@ -86,6 +86,13 @@ pub struct LogLoader {
 }
 
 impl LogLoader {
+    /// Every analyser this pipeline runs over one parsed sublog.
+    fn analyse(&self, parsed: &ParsedLog) -> Analysis {
+        Analysis {
+            spectral: self.analyzer.analyze(&parsed.flight_data, &parsed.metadata),
+        }
+    }
+
     /// Open and load one file on the calling thread.
     pub fn load_path(&self, path: &Path, cancel: &CancelToken, sink: &mut impl LoadSink) {
         match LogFile::open(path) {
@@ -128,9 +135,7 @@ impl LogLoader {
 
             match file.parse_log_with_progress(sublog, progress) {
                 Ok(parsed) => {
-                    loaded
-                        .analysis
-                        .push(self.analyzer.analyze(&parsed.flight_data, &parsed.metadata));
+                    loaded.analysis.push(self.analyse(&parsed));
                     loaded.logs.push(parsed);
                 }
                 Err(ParseError::Cancelled) => {

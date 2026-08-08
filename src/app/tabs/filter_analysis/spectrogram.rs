@@ -36,7 +36,7 @@ impl Spectrogram {
         let plot_height = stacked_plot_height(ui, 3);
 
         for axis in Axis::ALL {
-            let Some(spec) = ctx.analysis.axis(axis) else {
+            let Some(spec) = ctx.analysis.spectral.axis(axis) else {
                 continue;
             };
             let Some(time_map) = &spec.time_map else {

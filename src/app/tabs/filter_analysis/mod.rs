@@ -51,9 +51,9 @@ impl FilterAnalysis {
         ui.add_space(4.0);
 
         match self.selected {
-            FilterAnalysisTab::Psd => self.psd.show(ui, ctx.analysis),
-            FilterAnalysisTab::Frequency => self.frequency.show(ui, ctx.analysis),
-            FilterAnalysisTab::VsReference => self.vs_reference.show(ui, ctx.analysis),
+            FilterAnalysisTab::Psd => self.psd.show(ui, &ctx.analysis.spectral),
+            FilterAnalysisTab::Frequency => self.frequency.show(ui, &ctx.analysis.spectral),
+            FilterAnalysisTab::VsReference => self.vs_reference.show(ui, &ctx.analysis.spectral),
             FilterAnalysisTab::Spectrogram => self.spectrogram.show(ui, ctx),
         }
     }

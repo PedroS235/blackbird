@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use crate::analysis::SpectralAnalysis;
+use crate::analysis::Analysis;
 use crate::loader;
 use crate::parser::ParsedLog;
 
 pub(super) struct LoadedLog {
     pub(super) log: Vec<ParsedLog>,
-    /// One `SpectralAnalysis` per sublog in `log`, computed once at load time.
-    pub(super) analysis: Vec<SpectralAnalysis>,
+    /// One `Analysis` per sublog in `log`, computed once at load time.
+    pub(super) analysis: Vec<Analysis>,
     pub(super) active_sublog: usize,
 }
 
@@ -70,7 +70,7 @@ impl LogStore {
         self.selected = Some(index);
     }
 
-    pub(super) fn current_flight(&self) -> Option<(&ParsedLog, &SpectralAnalysis)> {
+    pub(super) fn current_flight(&self) -> Option<(&ParsedLog, &Analysis)> {
         let loaded = self.logs.get(self.selected?)?;
         let idx = loaded.active_sublog;
         Some((loaded.log.get(idx)?, loaded.analysis.get(idx)?))
@@ -92,7 +92,7 @@ mod test {
     fn loaded_log() -> LoadedLog {
         LoadedLog {
             log: vec![ParsedLog::default()],
-            analysis: vec![SpectralAnalysis::default()],
+            analysis: vec![Analysis::default()],
             active_sublog: 0,
         }
     }
