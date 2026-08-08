@@ -51,6 +51,13 @@ impl Tabs {
             self.show_tab_bar(ui);
             ui.separator();
 
+            // Reads no flight data, so it does not belong behind a log check —
+            // "coming soon" is a fact about the app, not about the log.
+            if self.selected == MainTab::AutoTune {
+                ui.label("Auto Tune - coming soon");
+                return;
+            }
+
             let Some((parsed, analysis)) = flight else {
                 ui.label("No log selected");
                 return;
@@ -65,9 +72,7 @@ impl Tabs {
                 MainTab::Timeseries => self.timeseries.show(ui, &ctx),
                 MainTab::FilterAnalysis => self.filter_analysis.show(ui, &ctx),
                 MainTab::PidAnalysis => self.pid_analysis.show(ui, &ctx),
-                MainTab::AutoTune => {
-                    ui.label("Auto Tune - coming soon");
-                }
+                MainTab::AutoTune => {}
             }
         });
     }
