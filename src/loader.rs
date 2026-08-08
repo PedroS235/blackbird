@@ -1,0 +1,199 @@
+//! The load pipeline: paths in, parsed-and-analysed logs out.
+//!
+//! Lives in the library half so the whole path — open, parse each sublog,
+//! analyse it — is drivable from a test without a UI. The UI keeps path
+//! picking and rendering; everything between the two is here.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+
+use crate::analysis::{GyroNoiseAnalyzer, SpectralAnalysis};
+use crate::parser::{LogFile, ParseError, ParsedLog};
+
+/// One file's sublogs, each with the spectral analysis computed at load time.
+#[derive(Debug, Default)]
+pub struct LoadedLog {
+    pub file_name: String,
+    pub logs: Vec<ParsedLog>,
+    /// One entry per sublog in `logs`, same order.
+    pub analysis: Vec<SpectralAnalysis>,
+}
+
+#[derive(Debug)]
+pub enum LoadEvent {
+    /// Decoding sublog `sublog` (0-based) of `sublog_count`, `fraction`
+    /// (0..=1) of the way through that sublog's data.
+    Progress {
+        file_name: String,
+        sublog: usize,
+        sublog_count: usize,
+        fraction: f32,
+    },
+    /// A file finished — holds every sublog of it that parsed.
+    Ready(LoadedLog),
+    /// One sublog, or a whole file, failed. The rest keeps loading.
+    Failed {
+        file_name: String,
+        error: String,
+    },
+    Cancelled {
+        file_name: String,
+    },
+}
+
+/// Where load events go. The UI plugs in an mpsc `Sender` and polls the
+/// receiver each frame; tests plug in a `Vec` and drive the load inline.
+pub trait LoadSink {
+    fn emit(&mut self, event: LoadEvent);
+}
+
+impl LoadSink for Vec<LoadEvent> {
+    fn emit(&mut self, event: LoadEvent) {
+        self.push(event);
+    }
+}
+
+impl LoadSink for Sender<LoadEvent> {
+    fn emit(&mut self, event: LoadEvent) {
+        // A dropped receiver means the UI moved on — nothing to report to.
+        self.send(event).ok();
+    }
+}
+
+/// Shared stop switch. Checked between sublogs, so cancellation takes at most
+/// one sublog's parse to land.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Drives open → parse → analyse. Holds the analysis knobs, so a caller that
+/// wants different peak thresholds sets them here instead of the pipeline
+/// hard-coding `GyroNoiseAnalyzer::default()`.
+#[derive(Debug, Clone, Default)]
+pub struct LogLoader {
+    pub analyzer: GyroNoiseAnalyzer,
+}
+
+impl LogLoader {
+    /// Open and load one file on the calling thread.
+    pub fn load_path(&self, path: &Path, cancel: &CancelToken, sink: &mut impl LoadSink) {
+        match LogFile::open(path) {
+            Ok(file) => self.load_file(&file, cancel, sink),
+            Err(error) => sink.emit(LoadEvent::Failed {
+                file_name: file_name_of(path),
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    /// Parse every sublog on the calling thread, analysing each as it lands.
+    /// A corrupt sublog is reported and skipped — one bad flight in a `.bbl`
+    /// no longer costs the other seven.
+    pub fn load_file(&self, file: &LogFile, cancel: &CancelToken, sink: &mut impl LoadSink) {
+        let sublog_count = file.log_count();
+        let name = &file.file_name;
+        let mut loaded = LoadedLog {
+            file_name: name.clone(),
+            ..Default::default()
+        };
+
+        for sublog in 0..sublog_count {
+            let mut progress = |fraction| {
+                sink.emit(LoadEvent::Progress {
+                    file_name: name.clone(),
+                    sublog,
+                    sublog_count,
+                    fraction,
+                });
+                !cancel.is_cancelled()
+            };
+
+            if !progress(0.0) {
+                sink.emit(LoadEvent::Cancelled {
+                    file_name: name.clone(),
+                });
+                return;
+            }
+
+            match file.parse_log_with_progress(sublog, progress) {
+                Ok(parsed) => {
+                    loaded
+                        .analysis
+                        .push(self.analyzer.analyze(&parsed.flight_data, &parsed.metadata));
+                    loaded.logs.push(parsed);
+                }
+                Err(ParseError::Cancelled) => {
+                    sink.emit(LoadEvent::Cancelled {
+                        file_name: name.clone(),
+                    });
+                    return;
+                }
+                Err(error) => sink.emit(LoadEvent::Failed {
+                    file_name: name.clone(),
+                    error: format!("log {}: {error}", sublog + 1),
+                }),
+            }
+        }
+
+        if !loaded.logs.is_empty() {
+            sink.emit(LoadEvent::Ready(loaded));
+        }
+    }
+
+    /// One thread per path. Events arrive interleaved, in whatever order the
+    /// threads produce them.
+    pub fn spawn(&self, paths: Vec<PathBuf>) -> LoadHandle {
+        let (tx, rx) = mpsc::channel();
+        let cancel = CancelToken::default();
+        let expected = paths.len();
+
+        for path in paths {
+            let (mut tx, cancel, loader) = (tx.clone(), cancel.clone(), self.clone());
+            std::thread::spawn(move || loader.load_path(&path, &cancel, &mut tx));
+        }
+
+        LoadHandle {
+            rx,
+            cancel,
+            expected,
+        }
+    }
+}
+
+/// A load in flight: the event stream plus the switch that stops it.
+pub struct LoadHandle {
+    pub rx: Receiver<LoadEvent>,
+    pub cancel: CancelToken,
+    /// Files in this load — one `Ready` or `Failed` each.
+    pub expected: usize,
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn cancel_token_is_shared_across_clones() {
+        let cancel = CancelToken::default();
+        let clone = cancel.clone();
+        cancel.cancel();
+        assert!(clone.is_cancelled());
+    }
+}

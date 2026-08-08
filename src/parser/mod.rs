@@ -34,6 +34,8 @@ pub enum ParseError {
     UnsupportedFirmware(String),
     #[error("Corrupt log: {0}")]
     Corrupt(String),
+    #[error("Parse cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +66,18 @@ impl LogFile {
     }
 
     pub fn parse_log(&self, log_index: usize) -> Result<ParsedLog, ParseError> {
+        self.parse_log_with_progress(log_index, |_| true)
+    }
+
+    /// `on_progress` is called with the fraction of this log's data decoded so
+    /// far (0..=1) every few thousand frames — often enough to drive a
+    /// progress bar, rare enough to be free. Returning `false` abandons the
+    /// parse with [`ParseError::Cancelled`].
+    pub fn parse_log_with_progress(
+        &self,
+        log_index: usize,
+        on_progress: impl FnMut(f32) -> bool,
+    ) -> Result<ParsedLog, ParseError> {
         let file = blackbox_log::File::new(&self.bytes);
         let count = file.log_count();
 
@@ -85,7 +99,8 @@ impl LogFile {
                     .map(|f| f.name.to_owned())
                     .collect();
 
-                let flight_data = build_flight_data(&mut parser, &field_names);
+                let flight_data = build_flight_data(&mut parser, &field_names, on_progress)
+                    .ok_or(ParseError::Cancelled)?;
                 metadata.duration = flight_data
                     .time_us
                     .first()
@@ -406,10 +421,16 @@ fn build_field_indices(field_names: &[String]) -> FieldIndices {
     idx
 }
 
+/// Frames between `on_progress` calls — the decode is fast enough that
+/// reporting every frame would cost more than the parse.
+const PROGRESS_INTERVAL_FRAMES: usize = 4096;
+
+/// `None` when `on_progress` asked to stop.
 fn build_flight_data(
     parser: &mut blackbox_log::DataParser<'_, '_>,
     field_names: &[String],
-) -> FlightData {
+    mut on_progress: impl FnMut(f32) -> bool,
+) -> Option<FlightData> {
     let idx = build_field_indices(field_names);
     let motor_count = idx.motors.len();
 
@@ -475,6 +496,12 @@ fn build_flight_data(
             .iter_mut()
             .zip(idx.debug)
             .for_each(|(b, c)| push(b, c));
+
+        if time_buf.len().is_multiple_of(PROGRESS_INTERVAL_FRAMES)
+            && !on_progress(parser.stats().progress)
+        {
+            return None;
+        }
     }
 
     let sample_rate = SampleRateEstimate::from_timestamps(&time_buf);
@@ -486,7 +513,7 @@ fn build_flight_data(
         }
     }
 
-    FlightData {
+    Some(FlightData {
         time_us: Arc::new(time_buf),
         sample_rate,
         raw_gyro: gyro_unfilt_bufs,
@@ -500,7 +527,7 @@ fn build_flight_data(
         current: current_buf,
         rssi: rssi_buf,
         debug: debug_bufs,
-    }
+    })
 }
 
 #[cfg(test)]

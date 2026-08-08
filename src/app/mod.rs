@@ -9,15 +9,16 @@ mod view_state;
 use std::{collections::VecDeque, sync::mpsc};
 
 use eframe::App;
+use elegance::ProgressBar;
 
 use crate::{
     app::{
-        log_store::{LoadEvent, LoadState, LoadedLog, LogStore},
+        log_store::{LoadState, LogStore},
         mainview::{FilterAnalysisTab, MainTab, PidAnalysisTab, TimeseriesTab},
         notification::Notification,
         view_state::MainViewState,
     },
-    parser::{self, LogFile},
+    loader::{LoadEvent, LogLoader},
 };
 
 const MAX_NOTIFICATIONS: usize = 50;
@@ -80,54 +81,65 @@ impl BlackbirdApp {
         }
     }
 
+    /// Drains whatever the loader threads produced since the last frame.
+    /// Failures are collected and reported after the drain — `notify` takes
+    /// `&mut self`, which the borrow on `load_state` rules out mid-loop.
     fn poll_load(&mut self, ctx: &egui::Context) {
         let LoadState::Loading {
-            rx,
-            loaded,
+            handle,
+            progress,
             current,
-            ..
         } = &mut self.load_state
         else {
             return;
         };
 
+        let mut errors = Vec::new();
+        let mut finished = false;
+
         loop {
-            match rx.try_recv() {
-                Ok(LoadEvent::Progress(name)) => {
-                    *current = name;
-                    ctx.request_repaint();
+            match handle.rx.try_recv() {
+                Ok(LoadEvent::Progress {
+                    file_name,
+                    sublog,
+                    sublog_count,
+                    fraction,
+                }) => {
+                    *current = format!("{file_name} — log {} / {sublog_count}", sublog + 1);
+                    progress.insert(file_name, (sublog as f32 + fraction) / sublog_count as f32);
                 }
-                Ok(LoadEvent::LogReady(log)) => {
-                    *loaded += 1;
-                    self.logs.push(log);
-                    ctx.request_repaint();
+                Ok(LoadEvent::Ready(log)) => {
+                    progress.insert(log.file_name.clone(), 1.0);
+                    self.logs.push(log.into());
                 }
-                Ok(LoadEvent::Error(msg)) => {
-                    self.notify(notification::Level::Error, msg);
-                    self.load_state = LoadState::Idle;
-                    return;
+                Ok(LoadEvent::Failed { file_name, error }) => {
+                    errors.push(format!("{file_name}: {error}"))
                 }
-                Err(mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(std::time::Duration::from_millis(16));
-                    return;
+                Ok(LoadEvent::Cancelled { file_name }) => {
+                    progress.insert(file_name, 1.0);
                 }
+                Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    if self.logs.is_empty() {
-                        self.notify(notification::Level::Error, "All logs in file were corrupt");
-                    }
-                    self.load_state = LoadState::Idle;
-                    return;
+                    finished = true;
+                    break;
                 }
             }
+        }
+
+        if finished {
+            self.load_state = LoadState::Idle;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+
+        for error in errors {
+            self.notify(notification::Level::Error, error);
         }
     }
 
     fn show_loading_modal(&self, ctx: &egui::Context) {
+        let fraction = self.load_state.fraction();
         let LoadState::Loading {
-            expected,
-            loaded,
-            current,
-            ..
+            handle, current, ..
         } = &self.load_state
         else {
             return;
@@ -138,12 +150,17 @@ impl BlackbirdApp {
             ui.vertical_centered(|ui| {
                 ui.heading("Loading logs");
                 ui.add_space(8.0);
-                ui.add(
-                    egui::ProgressBar::new(*loaded as f32 / *expected as f32)
-                        .text(format!("{} / {}", loaded, expected)),
-                );
+                ui.add(ProgressBar::new(fraction).text(if handle.expected > 1 {
+                    format!("{:.0}% of {} files", fraction * 100.0, handle.expected)
+                } else {
+                    format!("{:.0}%", fraction * 100.0)
+                }));
                 ui.add_space(4.0);
                 ui.label(current.as_str());
+                ui.add_space(8.0);
+                if ui.button("Cancel").clicked() {
+                    handle.cancel.cancel();
+                }
             });
         });
     }
@@ -156,53 +173,10 @@ impl BlackbirdApp {
             return;
         };
 
-        let (oks, errs): (Vec<_>, Vec<_>) = paths
-            .iter()
-            .map(|p| parser::LogFile::open(p).map_err(|e| (p, e)))
-            .partition(Result::is_ok);
-
-        for err in errs {
-            let (path, e) = err.unwrap_err();
-            self.notify(
-                notification::Level::Error,
-                format!("{}: {e}", path.display()),
-            );
-        }
-
-        let new_logs: Vec<LogFile> = oks.into_iter().map(Result::unwrap).collect();
-        // self.logs.extend(new_logs);
-
-        let (tx, rx) = mpsc::channel();
         self.load_state = LoadState::Loading {
-            rx,
-            expected: new_logs.len(),
-            loaded: 0,
+            handle: LogLoader::default().spawn(paths),
+            progress: Default::default(),
             current: String::new(),
         };
-
-        new_logs.into_iter().for_each(|log| {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                tx.send(LoadEvent::Progress(log.file_name.clone())).ok();
-                match log.parse_logs() {
-                    Ok(parsed) => {
-                        let noise_analyzer = crate::analysis::GyroNoiseAnalyzer::default();
-                        let analysis = parsed
-                            .iter()
-                            .map(|p| noise_analyzer.analyze(&p.flight_data, &p.metadata))
-                            .collect();
-                        tx.send(LoadEvent::LogReady(LoadedLog {
-                            log: parsed,
-                            analysis,
-                            active_sublog: 0,
-                        }))
-                        .ok();
-                    }
-                    Err(e) => {
-                        tx.send(LoadEvent::Error(e.to_string())).ok();
-                    }
-                }
-            });
-        });
     }
 }

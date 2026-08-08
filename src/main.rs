@@ -2,7 +2,7 @@
 
 mod app;
 
-use blackbird::{analysis, logging, parser, signal};
+use blackbird::{analysis, loader, logging, parser, signal};
 use logging::init_logging;
 
 fn main() {

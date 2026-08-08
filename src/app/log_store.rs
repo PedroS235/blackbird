@@ -1,6 +1,7 @@
-use std::sync::mpsc::Receiver;
+use std::collections::HashMap;
 
 use crate::analysis::SpectralAnalysis;
+use crate::loader;
 use crate::parser::ParsedLog;
 
 pub(super) struct LoadedLog {
@@ -10,20 +11,38 @@ pub(super) struct LoadedLog {
     pub(super) active_sublog: usize,
 }
 
-pub(super) enum LoadEvent {
-    Progress(String),
-    LogReady(LoadedLog),
-    Error(String),
+impl From<loader::LoadedLog> for LoadedLog {
+    fn from(loaded: loader::LoadedLog) -> Self {
+        Self {
+            log: loaded.logs,
+            analysis: loaded.analysis,
+            active_sublog: 0,
+        }
+    }
 }
 
 pub(super) enum LoadState {
     Idle,
     Loading {
-        rx: Receiver<LoadEvent>,
-        expected: usize,
-        loaded: usize,
+        handle: loader::LoadHandle,
+        /// Completion 0..=1 per file seen so far. Files whose thread hasn't
+        /// reported yet are simply absent, and count as 0.
+        progress: HashMap<String, f32>,
         current: String,
     },
+}
+
+impl LoadState {
+    /// Mean completion across every file in the load, so the bar advances
+    /// within a single sublog instead of only when a whole file lands.
+    pub(super) fn fraction(&self) -> f32 {
+        match self {
+            LoadState::Idle => 0.0,
+            LoadState::Loading {
+                handle, progress, ..
+            } => progress.values().sum::<f32>() / handle.expected.max(1) as f32,
+        }
+    }
 }
 
 /// Owns the loaded logs and which one is shown. Selection is single-choice —
@@ -37,10 +56,6 @@ pub(super) struct LogStore {
 }
 
 impl LogStore {
-    pub(super) fn is_empty(&self) -> bool {
-        self.logs.is_empty()
-    }
-
     /// Auto-selects only when this is the first log ever loaded — later
     /// loads never steal focus from what the user is already looking at.
     pub(super) fn push(&mut self, log: LoadedLog) {
