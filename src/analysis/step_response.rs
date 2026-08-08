@@ -59,6 +59,9 @@ pub struct AxisStepResponse {
 #[derive(Debug, Clone, Default)]
 pub struct StepResponseAnalysis {
     axes: PerAxis<Option<AxisStepResponse>>,
+    /// The stick mask this run used, so the panel can explain an empty axis
+    /// with the threshold that actually rejected it.
+    pub min_setpoint_dps: f64,
 }
 
 impl StepResponseAnalysis {
@@ -79,6 +82,7 @@ impl StepResponseAnalyzer {
                     .zip(fd.gyro(axis))
                     .and_then(|(setpoint, gyro)| self.analyze_axis(setpoint, gyro, fs))
             })),
+            min_setpoint_dps: self.min_setpoint_dps,
         }
     }
 

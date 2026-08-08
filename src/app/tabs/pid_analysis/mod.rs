@@ -1,8 +1,10 @@
 mod gyro_vs_setpoint;
+mod step_response;
 
 use egui::Ui;
 
 use super::TabCtx;
+use step_response::StepResponse;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PidAnalysisTab {
@@ -14,17 +16,17 @@ enum PidAnalysisTab {
 #[derive(Default)]
 pub(super) struct PidAnalysis {
     selected: PidAnalysisTab,
+    step_response: StepResponse,
 }
 
 impl PidAnalysis {
     pub(super) fn show(&mut self, ui: &mut Ui, ctx: &TabCtx<'_>) {
         ui.horizontal(|ui| {
-            for (tab, label, enabled) in [
-                (PidAnalysisTab::GyroVsSetpoint, "Gyro Vs Setpoint", true),
-                (PidAnalysisTab::StepResponse, "Step Response", false),
+            for (tab, label) in [
+                (PidAnalysisTab::GyroVsSetpoint, "Gyro Vs Setpoint"),
+                (PidAnalysisTab::StepResponse, "Step Response"),
             ] {
-                let selectable = egui::Button::selectable(self.selected == tab, label);
-                if ui.add_enabled(enabled, selectable).clicked() {
+                if ui.selectable_label(self.selected == tab, label).clicked() {
                     self.selected = tab;
                 }
             }
@@ -33,9 +35,7 @@ impl PidAnalysis {
 
         match self.selected {
             PidAnalysisTab::GyroVsSetpoint => gyro_vs_setpoint::show(ui, ctx.flight),
-            PidAnalysisTab::StepResponse => {
-                ui.label("Step Response - coming soon");
-            }
+            PidAnalysisTab::StepResponse => self.step_response.show(ui, ctx),
         }
     }
 }
