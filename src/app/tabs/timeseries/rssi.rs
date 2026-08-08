@@ -1,5 +1,6 @@
 use egui::{Color32, RichText, Ui};
 
+use crate::app::tabs::stacked_plot_height;
 use crate::app::ui::timeseries_plot::{Series, TimeseriesPlot};
 use crate::parser::FlightData;
 
@@ -22,7 +23,7 @@ pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
             samples: rssi,
         }],
         default_x_range: Some((0.0, fd.duration_s().max(f64::MIN_POSITIVE))),
-        height: Some((ui.available_height() - 24.0).max(80.0)),
+        height: Some(stacked_plot_height(ui, 1)),
     }
     .show(ui);
 }

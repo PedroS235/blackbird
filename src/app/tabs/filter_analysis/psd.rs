@@ -11,16 +11,9 @@ const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
 /// Keeps an explicit checkbox rather than a legend: the filtered trace is a
 /// conditional build, not a hide, and the panel emits a named marker per
 /// detected peak — a legend here would list a dozen frequency labels.
+#[derive(Default)]
 pub(super) struct Psd {
     filtered_visible: PerAxis<bool>,
-}
-
-impl Default for Psd {
-    fn default() -> Self {
-        Self {
-            filtered_visible: PerAxis::splat(false),
-        }
-    }
 }
 
 impl Psd {
