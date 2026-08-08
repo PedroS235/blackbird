@@ -1,13 +1,12 @@
-use egui::{Color32, ColorImage, RichText, TextureOptions, Ui, Vec2};
-use egui_plot::{Line, Plot, PlotImage, PlotPoint, PlotPoints, Text, VLine};
+use egui::{Color32, RichText, Ui};
+use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 use elegance::Slider;
 
 use crate::analysis::SpectralAnalysis;
 use crate::parser::FlightData;
-use crate::signal::fft::BinnedSpectrum;
-use crate::signal::timeseries::windowed_downsample;
 
 use super::BlackbirdApp;
+use super::ui::heatmap::{Heatmap, HeatmapOrientation, OverlaySeries};
 use super::ui::timeseries_plot::{Series, TimeseriesPlot};
 
 const GYRO_AXIS_NAMES: [&str; 3] = ["roll", "pitch", "yaw"];
@@ -471,94 +470,21 @@ impl BlackbirdApp {
             let overlay = has_dyn_notch_trace
                 .then(|| fd.debug[i].as_deref())
                 .flatten()
-                .map(|samples| (t0, fd.time_us.as_slice(), samples));
-            Self::show_time_heatmap(
-                ui,
-                &format!("spectrogram_{}", GYRO_AXIS_NAMES[i]),
-                time_map,
-                plot_height,
-                *floor_db as f64,
+                .map(|samples| OverlaySeries {
+                    t0,
+                    time_us: fd.time_us.as_slice(),
+                    samples,
+                });
+            Heatmap {
+                id: format!("spectrogram_{}", GYRO_AXIS_NAMES[i]),
+                orientation: HeatmapOrientation::VsTime,
+                spectrum: time_map,
+                height: plot_height,
+                floor_db: *floor_db as f64,
                 overlay,
-            );
-        }
-    }
-
-    /// Transposed variant of `show_binned_heatmap` — time on x, Hz on y — with
-    /// an optional tracked-frequency line overlaid in plot space.
-    fn show_time_heatmap(
-        ui: &mut egui::Ui,
-        id: &str,
-        spectrum: &BinnedSpectrum,
-        height: f32,
-        floor_db: f64,
-        overlay: Option<(u64, &[u64], &[f64])>,
-    ) {
-        let freq_count = spectrum.freq_hz.len();
-        let n_bins = spectrum.bin_centers.len();
-        if freq_count < 2 || n_bins == 0 {
-            ui.label("Not enough data");
-            return;
-        }
-
-        let db_range = (0.0 - floor_db).max(f64::MIN_POSITIVE);
-
-        // Texture rows run top-to-bottom, but plot y grows upward, so the highest
-        // frequency goes in row 0 to line the image up with the plot's y axis.
-        let mut pixels = vec![Color32::TRANSPARENT; n_bins * freq_count];
-        for (bin, row) in spectrum.power_db.iter().enumerate() {
-            for (freq_idx, &v) in row.iter().enumerate() {
-                if v.is_finite() {
-                    let y = freq_count - 1 - freq_idx;
-                    pixels[y * n_bins + bin] = heat_color(((v - floor_db) / db_range) as f32);
-                }
             }
+            .show(ui);
         }
-        let texture = ui.ctx().load_texture(
-            id,
-            ColorImage::new([n_bins, freq_count], pixels),
-            TextureOptions::LINEAR,
-        );
-
-        let freq_min = spectrum.freq_hz[0];
-        let freq_max = spectrum.freq_hz[freq_count - 1];
-        let bin_width = if n_bins > 1 {
-            spectrum.bin_centers[1] - spectrum.bin_centers[0]
-        } else {
-            1.0
-        };
-        let t_min = spectrum.bin_centers[0] - bin_width / 2.0;
-        let t_max = spectrum.bin_centers[n_bins - 1] + bin_width / 2.0;
-
-        let bucket_count = (ui.available_width().max(1.0) as usize).max(1);
-
-        Plot::new(id)
-            .height(height)
-            .x_axis_label("s")
-            .y_axis_label("Hz")
-            .show(ui, |plot_ui| {
-                plot_ui.image(PlotImage::new(
-                    id,
-                    &texture,
-                    PlotPoint::new((t_min + t_max) / 2.0, (freq_min + freq_max) / 2.0),
-                    Vec2::new((t_max - t_min) as f32, (freq_max - freq_min) as f32),
-                ));
-
-                if let Some((t0, time_us, samples)) = overlay {
-                    let bounds = plot_ui.plot_bounds();
-                    let points = windowed_downsample(
-                        time_us,
-                        samples,
-                        t0,
-                        bounds.min()[0],
-                        bounds.max()[0],
-                        bucket_count,
-                    );
-                    plot_ui.line(
-                        Line::new("tracked center freq", PlotPoints::from(points))
-                            .color(Color32::WHITE),
-                    );
-                }
-            });
     }
 
     fn show_psd_tab(
@@ -733,76 +659,16 @@ impl BlackbirdApp {
             };
 
             ui.label(RichText::new(format!("{} vs throttle", GYRO_AXIS_NAMES[i])).strong());
-            Self::show_binned_heatmap(
-                ui,
-                &format!("throttle_heatmap_{}", GYRO_AXIS_NAMES[i]),
-                throttle_map,
-                "throttle",
-                plot_height,
-                *floor_db as f64,
-            );
-        }
-    }
-
-    /// `floor_db` is the noise floor, in dB relative to the map's peak (which
-    /// sits at 0dB) — the user-controlled "sensitivity" of the color scale.
-    /// Anything at or below it maps to the coldest color.
-    fn show_binned_heatmap(
-        ui: &mut egui::Ui,
-        id: &str,
-        spectrum: &BinnedSpectrum,
-        y_label: &str,
-        height: f32,
-        floor_db: f64,
-    ) {
-        let freq_count = spectrum.freq_hz.len();
-        let n_bins = spectrum.bin_centers.len();
-        if freq_count < 2 || n_bins == 0 {
-            ui.label("Not enough data");
-            return;
-        }
-
-        let db_range = (0.0 - floor_db).max(f64::MIN_POSITIVE);
-
-        // Texture rows run top-to-bottom, but plot y grows upward, so the highest
-        // bin goes in row 0 to line the image up with the plot's y axis.
-        let mut pixels = vec![Color32::TRANSPARENT; freq_count * n_bins];
-        for (bin, row) in spectrum.power_db.iter().enumerate() {
-            let y = n_bins - 1 - bin;
-            for (x, &v) in row.iter().enumerate() {
-                if v.is_finite() {
-                    pixels[y * freq_count + x] = heat_color(((v - floor_db) / db_range) as f32);
-                }
+            Heatmap {
+                id: format!("throttle_heatmap_{}", GYRO_AXIS_NAMES[i]),
+                orientation: HeatmapOrientation::VsThrottle,
+                spectrum: throttle_map,
+                height: plot_height,
+                floor_db: *floor_db as f64,
+                overlay: None,
             }
+            .show(ui);
         }
-        let texture = ui.ctx().load_texture(
-            id,
-            ColorImage::new([freq_count, n_bins], pixels),
-            TextureOptions::LINEAR,
-        );
-
-        let freq_min = spectrum.freq_hz[0];
-        let freq_max = spectrum.freq_hz[freq_count - 1];
-        let bin_width = if n_bins > 1 {
-            spectrum.bin_centers[1] - spectrum.bin_centers[0]
-        } else {
-            1.0
-        };
-        let y_min = spectrum.bin_centers[0] - bin_width / 2.0;
-        let y_max = spectrum.bin_centers[n_bins - 1] + bin_width / 2.0;
-
-        Plot::new(id)
-            .height(height)
-            .x_axis_label("Hz")
-            .y_axis_label(y_label)
-            .show(ui, |plot_ui| {
-                plot_ui.image(PlotImage::new(
-                    id,
-                    &texture,
-                    PlotPoint::new((freq_min + freq_max) / 2.0, (y_min + y_max) / 2.0),
-                    Vec2::new((freq_max - freq_min) as f32, (y_max - y_min) as f32),
-                ));
-            });
     }
 }
 
@@ -816,16 +682,4 @@ fn spectrum_peak(freq_hz: &[f64], magnitude: &[f64], min_hz: f64) -> Option<(f64
         .filter(|&(&f, _)| f >= min_hz)
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(&f, &m)| (f, m))
-}
-
-fn heat_color(t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let (r, g, b) = if t < 0.5 {
-        let s = t * 2.0;
-        (0.0, s, 1.0 - s)
-    } else {
-        let s = (t - 0.5) * 2.0;
-        (s, 1.0 - s, 0.0)
-    };
-    Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
