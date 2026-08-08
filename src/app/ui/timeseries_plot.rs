@@ -8,7 +8,6 @@ pub struct Series<'a> {
     pub color: Color32,
     pub time_us: &'a [u64],
     pub samples: &'a [f64],
-    pub visible: bool,
 }
 
 pub struct TimeseriesPlot<'a> {
@@ -21,9 +20,9 @@ pub struct TimeseriesPlot<'a> {
 }
 
 impl TimeseriesPlot<'_> {
-    pub fn show(&mut self, ui: &mut egui::Ui) {
-        self.show_controls(ui);
-
+    /// Series visibility is the legend's job — `egui_plot` filters hidden
+    /// items out of the build closure itself, so nothing here reads it back.
+    pub fn show(&self, ui: &mut egui::Ui) {
         let bucket_count = (ui.available_width().max(1.0) as usize).max(1);
 
         let (y_min, y_max) = self
@@ -63,7 +62,7 @@ impl TimeseriesPlot<'_> {
             let bounds = plot_ui.plot_bounds();
             let (visible_start, visible_end) = (bounds.min()[0], bounds.max()[0]);
 
-            for s in self.series.iter().filter(|s| s.visible) {
+            for s in &self.series {
                 let points = windowed_downsample(
                     s.time_us,
                     s.samples,
@@ -73,14 +72,6 @@ impl TimeseriesPlot<'_> {
                     bucket_count,
                 );
                 plot_ui.line(Line::new(s.label.clone(), PlotPoints::from(points)).color(s.color));
-            }
-        });
-    }
-
-    fn show_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            for s in &mut self.series {
-                ui.checkbox(&mut s.visible, &s.label);
             }
         });
     }

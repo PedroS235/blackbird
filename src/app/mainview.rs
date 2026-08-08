@@ -53,7 +53,7 @@ pub(super) enum PidAnalysisTab {
 
 impl BlackbirdApp {
     pub(super) fn show_mainview(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.show_main_tabs(ui);
             ui.separator();
 
@@ -123,21 +123,9 @@ impl BlackbirdApp {
         };
 
         match self.timeseries_tab {
-            TimeseriesTab::Gyro => Self::show_gyro_plots(
-                ui,
-                fd,
-                &mut self.view_state.timeseries.gyro_filtered_visible,
-                &mut self.view_state.timeseries.gyro_raw_visible,
-            ),
-            TimeseriesTab::PowerBattery => Self::show_power_battery_plots(
-                ui,
-                fd,
-                &mut self.view_state.timeseries.vbat_visible,
-                &mut self.view_state.timeseries.current_visible,
-            ),
-            TimeseriesTab::Rssi => {
-                Self::show_rssi_plot(ui, fd, &mut self.view_state.timeseries.rssi_visible)
-            }
+            TimeseriesTab::Gyro => Self::show_gyro_plots(ui, fd),
+            TimeseriesTab::PowerBattery => Self::show_power_battery_plots(ui, fd),
+            TimeseriesTab::Rssi => Self::show_rssi_plot(ui, fd),
         }
     }
 
@@ -161,24 +149,14 @@ impl BlackbirdApp {
         let fd = &parsed.flight_data;
 
         match self.pidanalysis_tab {
-            PidAnalysisTab::GyroVsSetpoint => Self::show_gyro_vs_setpoint_plots(
-                ui,
-                fd,
-                &mut self.view_state.pid_analysis.gyro_filtered_visible,
-                &mut self.view_state.pid_analysis.setpoint_visible,
-            ),
+            PidAnalysisTab::GyroVsSetpoint => Self::show_gyro_vs_setpoint_plots(ui, fd),
             PidAnalysisTab::StepResponse => {
                 ui.label("Step Response - coming soon");
             }
         }
     }
 
-    fn show_gyro_plots(
-        ui: &mut egui::Ui,
-        fd: &FlightData,
-        filtered_visible: &mut PerAxis<bool>,
-        raw_visible: &mut PerAxis<bool>,
-    ) {
+    fn show_gyro_plots(ui: &mut egui::Ui, fd: &FlightData) {
         let t0 = fd.start_us();
         let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
@@ -196,7 +174,6 @@ impl BlackbirdApp {
                 color: GYRO_RAW_COLOR,
                 time_us: fd.time_us(),
                 samples: raw,
-                visible: raw_visible[axis],
             }];
 
             if let Some(filtered) = fd.gyro(axis) {
@@ -205,31 +182,22 @@ impl BlackbirdApp {
                     color: GYRO_AXIS_COLORS[axis],
                     time_us: fd.time_us(),
                     samples: filtered,
-                    visible: filtered_visible[axis],
                 });
             }
 
-            let mut plot = TimeseriesPlot {
+            TimeseriesPlot {
                 id: format!("gyro_plot_{}", axis.name()),
                 y_label: "deg/s".to_string(),
                 t0,
                 series,
                 default_x_range: Some((0.0, duration_s)),
                 height: Some(plot_height),
-            };
-            plot.show(ui);
-
-            raw_visible[axis] = plot.series[0].visible;
-            filtered_visible[axis] = plot.series[1].visible;
+            }
+            .show(ui);
         }
     }
 
-    fn show_gyro_vs_setpoint_plots(
-        ui: &mut egui::Ui,
-        fd: &FlightData,
-        gyro_visible: &mut PerAxis<bool>,
-        setpoint_visible: &mut PerAxis<bool>,
-    ) {
+    fn show_gyro_vs_setpoint_plots(ui: &mut egui::Ui, fd: &FlightData) {
         let t0 = fd.start_us();
         let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
@@ -247,7 +215,6 @@ impl BlackbirdApp {
                 color: GYRO_AXIS_COLORS[axis],
                 time_us: fd.time_us(),
                 samples: gyro,
-                visible: gyro_visible[axis],
             }];
 
             if let Some(setpoint) = fd.setpoint(axis) {
@@ -256,33 +223,22 @@ impl BlackbirdApp {
                     color: SETPOINT_COLOR,
                     time_us: fd.time_us(),
                     samples: setpoint,
-                    visible: setpoint_visible[axis],
                 });
             }
 
-            let mut plot = TimeseriesPlot {
+            TimeseriesPlot {
                 id: format!("gyro_vs_setpoint_plot_{}", axis.name()),
                 y_label: "deg/s".to_string(),
                 t0,
                 series,
                 default_x_range: Some((0.0, duration_s)),
                 height: Some(plot_height),
-            };
-            plot.show(ui);
-
-            gyro_visible[axis] = plot.series[0].visible;
-            if let Some(setpoint_series) = plot.series.get(1) {
-                setpoint_visible[axis] = setpoint_series.visible;
             }
+            .show(ui);
         }
     }
 
-    fn show_power_battery_plots(
-        ui: &mut egui::Ui,
-        fd: &FlightData,
-        vbat_visible: &mut bool,
-        current_visible: &mut bool,
-    ) {
+    fn show_power_battery_plots(ui: &mut egui::Ui, fd: &FlightData) {
         let t0 = fd.start_us();
         let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
@@ -295,7 +251,7 @@ impl BlackbirdApp {
 
         if let Some(vbat) = fd.vbat() {
             ui.label(RichText::new("Battery Voltage").strong());
-            let mut plot = TimeseriesPlot {
+            TimeseriesPlot {
                 id: "power_vbat_plot".to_string(),
                 y_label: "V".to_string(),
                 t0,
@@ -304,18 +260,16 @@ impl BlackbirdApp {
                     color: VBAT_COLOR,
                     time_us: fd.time_us(),
                     samples: vbat,
-                    visible: *vbat_visible,
                 }],
                 default_x_range: Some((0.0, duration_s)),
                 height: Some(plot_height),
-            };
-            plot.show(ui);
-            *vbat_visible = plot.series[0].visible;
+            }
+            .show(ui);
         }
 
         if let Some(current) = fd.current() {
             ui.label(RichText::new("Current").strong());
-            let mut plot = TimeseriesPlot {
+            TimeseriesPlot {
                 id: "power_current_plot".to_string(),
                 y_label: "A".to_string(),
                 t0,
@@ -324,17 +278,15 @@ impl BlackbirdApp {
                     color: CURRENT_COLOR,
                     time_us: fd.time_us(),
                     samples: current,
-                    visible: *current_visible,
                 }],
                 default_x_range: Some((0.0, duration_s)),
                 height: Some(plot_height),
-            };
-            plot.show(ui);
-            *current_visible = plot.series[0].visible;
+            }
+            .show(ui);
         }
     }
 
-    fn show_rssi_plot(ui: &mut egui::Ui, fd: &FlightData, rssi_visible: &mut bool) {
+    fn show_rssi_plot(ui: &mut egui::Ui, fd: &FlightData) {
         let Some(rssi) = fd.rssi() else {
             return;
         };
@@ -343,7 +295,7 @@ impl BlackbirdApp {
         let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
         ui.label(RichText::new("RSSI").strong());
-        let mut plot = TimeseriesPlot {
+        TimeseriesPlot {
             id: "rssi_plot".to_string(),
             y_label: "%".to_string(),
             t0,
@@ -352,13 +304,11 @@ impl BlackbirdApp {
                 color: RSSI_COLOR,
                 time_us: fd.time_us(),
                 samples: rssi,
-                visible: *rssi_visible,
             }],
             default_x_range: Some((0.0, duration_s)),
             height: Some((ui.available_height() - 24.0).max(80.0)),
-        };
-        plot.show(ui);
-        *rssi_visible = plot.series[0].visible;
+        }
+        .show(ui);
     }
 
     fn show_filter_analysis_tab(&mut self, ui: &mut Ui) {

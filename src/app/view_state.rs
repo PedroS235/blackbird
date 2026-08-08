@@ -1,30 +1,12 @@
 use crate::parser::PerAxis;
 
-/// Per-tab UI state (checkbox visibility, slider values) for `MainTab::Timeseries`.
-pub(super) struct TimeseriesTabState {
-    pub(super) gyro_filtered_visible: PerAxis<bool>,
-    pub(super) gyro_raw_visible: PerAxis<bool>,
-    pub(super) vbat_visible: bool,
-    pub(super) current_visible: bool,
-    pub(super) rssi_visible: bool,
-}
-
-impl Default for TimeseriesTabState {
-    fn default() -> Self {
-        Self {
-            gyro_filtered_visible: PerAxis::splat(true),
-            gyro_raw_visible: PerAxis::splat(true),
-            vbat_visible: true,
-            current_visible: true,
-            rssi_visible: true,
-        }
-    }
-}
-
 /// Per-tab UI state for `MainTab::FilterAnalysis`. `psd_filtered_visible` and
 /// `frequency_filtered_visible` are deliberately separate fields — they used
 /// to be the same field shared across the Psd and Frequency sub-tabs, which
 /// meant toggling one silently toggled the other.
+///
+/// The timeseries family of plots has no state here: its series visibility is
+/// the plot legend's, and so lives in `egui_plot`'s per-plot memory.
 pub(super) struct FilterAnalysisTabState {
     pub(super) psd_filtered_visible: PerAxis<bool>,
     pub(super) frequency_filtered_visible: PerAxis<bool>,
@@ -45,26 +27,7 @@ impl Default for FilterAnalysisTabState {
     }
 }
 
-/// Per-tab UI state for `MainTab::PidAnalysis`. `gyro_filtered_visible` is its
-/// own field, independent from `TimeseriesTabState`'s — see that struct's doc
-/// comment for why they used to be (incorrectly) shared.
-pub(super) struct PidAnalysisTabState {
-    pub(super) gyro_filtered_visible: PerAxis<bool>,
-    pub(super) setpoint_visible: PerAxis<bool>,
-}
-
-impl Default for PidAnalysisTabState {
-    fn default() -> Self {
-        Self {
-            gyro_filtered_visible: PerAxis::splat(true),
-            setpoint_visible: PerAxis::splat(true),
-        }
-    }
-}
-
 #[derive(Default)]
 pub(super) struct MainViewState {
-    pub(super) timeseries: TimeseriesTabState,
     pub(super) filter_analysis: FilterAnalysisTabState,
-    pub(super) pid_analysis: PidAnalysisTabState,
 }
