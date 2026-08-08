@@ -30,7 +30,6 @@ enum MainTab {
     Timeseries,
     FilterAnalysis,
     PidAnalysis,
-    AutoTune,
 }
 
 /// The whole main view: which tab is open at each level, and every tab's own
@@ -51,13 +50,6 @@ impl Tabs {
             self.show_tab_bar(ui);
             ui.separator();
 
-            // Reads no flight data, so it does not belong behind a log check —
-            // "coming soon" is a fact about the app, not about the log.
-            if self.selected == MainTab::AutoTune {
-                ui.label("Auto Tune - coming soon");
-                return;
-            }
-
             let Some((parsed, analysis)) = flight else {
                 ui.label("No log selected");
                 return;
@@ -72,7 +64,6 @@ impl Tabs {
                 MainTab::Timeseries => self.timeseries.show(ui, &ctx),
                 MainTab::FilterAnalysis => self.filter_analysis.show(ui, &ctx),
                 MainTab::PidAnalysis => self.pid_analysis.show(ui, &ctx),
-                MainTab::AutoTune => {}
             }
         });
     }
@@ -83,7 +74,6 @@ impl Tabs {
                 (MainTab::Timeseries, "Timeseries"),
                 (MainTab::FilterAnalysis, "Filter Analysis"),
                 (MainTab::PidAnalysis, "PID Analysis"),
-                (MainTab::AutoTune, "Auto Tune"),
             ] {
                 if ui.selectable_label(self.selected == tab, label).clicked() {
                     self.selected = tab;
