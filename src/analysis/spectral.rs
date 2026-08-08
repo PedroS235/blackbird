@@ -1,5 +1,5 @@
 use crate::parser::metadata::FilterConfig;
-use crate::parser::{FlightData, Metadata};
+use crate::parser::{Axis, FlightData, Metadata, PerAxis};
 use crate::signal::fft::{self, BinnedSpectrum, Psd, SignalAnalyzer, Spectrum};
 
 /// Runs PSD/peak/harmonic analysis on a gyro axis against its Betaflight
@@ -68,9 +68,16 @@ pub struct AxisSpectral {
 
 #[derive(Debug, Clone, Default)]
 pub struct SpectralAnalysis {
-    pub axes: [Option<AxisSpectral>; 3],
+    axes: PerAxis<Option<AxisSpectral>>,
     /// Shared across axes — filter config is global, not per-axis.
     pub filter_markers: Vec<FilterMarker>,
+}
+
+impl SpectralAnalysis {
+    /// `None` when the axis had no pre-filter gyro to analyse.
+    pub fn axis(&self, axis: Axis) -> Option<&AxisSpectral> {
+        self.axes[axis].as_ref()
+    }
 }
 
 impl GyroNoiseAnalyzer {
@@ -79,10 +86,10 @@ impl GyroNoiseAnalyzer {
         let throttle = fd.throttle();
         let time_ref = fd.time_s();
 
-        let axes = std::array::from_fn(|i| {
-            fd.gyro_raw(i)
-                .map(|raw| self.analyze_axis(raw, fd.gyro(i), throttle, &time_ref, fs))
-        });
+        let axes = PerAxis(Axis::ALL.map(|axis| {
+            fd.gyro_raw(axis)
+                .map(|raw| self.analyze_axis(raw, fd.gyro(axis), throttle, &time_ref, fs))
+        }));
 
         SpectralAnalysis {
             axes,
@@ -238,7 +245,7 @@ impl GyroNoiseAnalyzer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::parser::Channel;
+    use crate::parser::{Axis, Channel};
 
     /// 200 Hz sine on roll's pre-filter gyro, nothing on pitch/yaw.
     fn one_axis_log(freq_hz: f64, fs: f64, samples: usize) -> FlightData {
@@ -248,7 +255,7 @@ mod test {
             .collect();
         FlightData::default()
             .with_time((0..samples as u64).map(|i| 7_000_000 + i * dt_us).collect())
-            .with_channel(Channel::RawGyro(0), sine)
+            .with_channel(Channel::RawGyro(Axis::Roll), sine)
     }
 
     #[test]
@@ -256,7 +263,7 @@ mod test {
         let analysis = GyroNoiseAnalyzer::default()
             .analyze(&one_axis_log(200.0, 2000.0, 8192), &Metadata::default());
 
-        let roll = analysis.axes[0].as_ref().expect("roll analysed");
+        let roll = analysis.axis(Axis::Roll).expect("roll analysed");
         let loudest = roll
             .peaks
             .iter()
@@ -275,8 +282,8 @@ mod test {
         let analysis = GyroNoiseAnalyzer::default()
             .analyze(&one_axis_log(200.0, 2000.0, 2048), &Metadata::default());
 
-        assert!(analysis.axes[1].is_none());
-        assert!(analysis.axes[2].is_none());
+        assert!(analysis.axis(Axis::Pitch).is_none());
+        assert!(analysis.axis(Axis::Yaw).is_none());
     }
 
     #[test]
@@ -284,7 +291,7 @@ mod test {
         let analysis = GyroNoiseAnalyzer::default()
             .analyze(&one_axis_log(200.0, 2000.0, 2048), &Metadata::default());
 
-        assert!(analysis.axes[0].as_ref().unwrap().throttle_map.is_none());
+        assert!(analysis.axis(Axis::Roll).unwrap().throttle_map.is_none());
     }
 }
 

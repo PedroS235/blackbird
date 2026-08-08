@@ -24,15 +24,72 @@ pub struct FlightData {
     pub(super) debug: [Option<Vec<f64>>; 8],
 }
 
-/// Names a single logged stream. The index is the axis (roll/pitch/yaw) for
-/// gyro-like channels, or the Betaflight channel number for stick input.
+/// Betaflight axis order — the discriminant *is* the index into every
+/// per-axis array, so an `Axis` can never point outside one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Axis {
+    Roll = 0,
+    Pitch,
+    Yaw,
+}
+
+impl Axis {
+    pub const ALL: [Axis; 3] = [Axis::Roll, Axis::Pitch, Axis::Yaw];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Axis::Roll => "roll",
+            Axis::Pitch => "pitch",
+            Axis::Yaw => "yaw",
+        }
+    }
+}
+
+/// Three values, one per axis, indexed by `Axis` instead of by number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PerAxis<T>(pub [T; 3]);
+
+impl<T> PerAxis<T> {
+    pub const fn splat(value: T) -> Self
+    where
+        T: Copy,
+    {
+        Self([value; 3])
+    }
+}
+
+impl<T> std::ops::Index<Axis> for PerAxis<T> {
+    type Output = T;
+
+    fn index(&self, axis: Axis) -> &T {
+        &self.0[axis.index()]
+    }
+}
+
+impl<T> std::ops::IndexMut<Axis> for PerAxis<T> {
+    fn index_mut(&mut self, axis: Axis) -> &mut T {
+        &mut self.0[axis.index()]
+    }
+}
+
+/// Betaflight logs throttle as the fourth stick channel.
+const THROTTLE: usize = 3;
+
+/// Names a single logged stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
-    RawGyro(usize),
-    Gyro(usize),
-    RcCommand(usize),
-    Setpoint(usize),
-    Acceleration(usize),
+    RawGyro(Axis),
+    Gyro(Axis),
+    RcCommand(Axis),
+    Setpoint(Axis),
+    Acceleration(Axis),
+    /// `rcCommand[3]` — the fourth stick channel, which has no axis.
+    Throttle,
     Motor(usize),
     Debug(usize),
     Vbat,
@@ -43,15 +100,19 @@ pub enum Channel {
 impl FlightData {
     pub fn with_channel(mut self, channel: Channel, samples: Vec<f64>) -> Self {
         let slot = match channel {
-            Channel::RawGyro(i) => self.raw_gyro.get_mut(i),
-            Channel::Gyro(i) => self.gyro.get_mut(i),
-            Channel::Acceleration(i) => self.acceleration.get_mut(i),
-            Channel::Setpoint(i) => self.setpoint.get_mut(i),
-            Channel::RcCommand(i) => self.rc_command.get_mut(i),
-            Channel::Debug(i) => self.debug.get_mut(i),
-            Channel::Vbat => Some(&mut self.vbat),
-            Channel::Current => Some(&mut self.current),
-            Channel::Rssi => Some(&mut self.rssi),
+            Channel::RawGyro(axis) => &mut self.raw_gyro[axis.index()],
+            Channel::Gyro(axis) => &mut self.gyro[axis.index()],
+            Channel::Acceleration(axis) => &mut self.acceleration[axis.index()],
+            Channel::Setpoint(axis) => &mut self.setpoint[axis.index()],
+            Channel::RcCommand(axis) => &mut self.rc_command[axis.index()],
+            Channel::Throttle => &mut self.rc_command[THROTTLE],
+            Channel::Vbat => &mut self.vbat,
+            Channel::Current => &mut self.current,
+            Channel::Rssi => &mut self.rssi,
+            Channel::Debug(i) => match self.debug.get_mut(i) {
+                Some(slot) => slot,
+                None => return self,
+            },
             Channel::Motor(i) => {
                 if self.motors.len() <= i {
                     self.motors.resize(i + 1, Vec::new());
@@ -60,19 +121,18 @@ impl FlightData {
                 return self;
             }
         };
-        if let Some(slot) = slot {
-            *slot = Some(samples);
-        }
+        *slot = Some(samples);
         self
     }
 
     pub fn channel(&self, channel: Channel) -> Option<&[f64]> {
         match channel {
-            Channel::RawGyro(i) => self.raw_gyro.get(i)?.as_deref(),
-            Channel::Gyro(i) => self.gyro.get(i)?.as_deref(),
-            Channel::Acceleration(i) => self.acceleration.get(i)?.as_deref(),
-            Channel::Setpoint(i) => self.setpoint.get(i)?.as_deref(),
-            Channel::RcCommand(i) => self.rc_command.get(i)?.as_deref(),
+            Channel::RawGyro(axis) => self.raw_gyro[axis.index()].as_deref(),
+            Channel::Gyro(axis) => self.gyro[axis.index()].as_deref(),
+            Channel::Acceleration(axis) => self.acceleration[axis.index()].as_deref(),
+            Channel::Setpoint(axis) => self.setpoint[axis.index()].as_deref(),
+            Channel::RcCommand(axis) => self.rc_command[axis.index()].as_deref(),
+            Channel::Throttle => self.rc_command[THROTTLE].as_deref(),
             Channel::Debug(i) => self.debug.get(i)?.as_deref(),
             Channel::Motor(i) => self.motors.get(i).map(Vec::as_slice),
             Channel::Vbat => self.vbat.as_deref(),
@@ -93,7 +153,7 @@ impl FlightData {
     /// `debug[0..3]` populated — under debug mode `FFT_FREQ` that's the dynamic
     /// notch tracker's per-axis center frequency.
     pub fn has_debug_axes(&self) -> bool {
-        (0..3).any(|i| self.channel(Channel::Debug(i)).is_some())
+        Axis::ALL.iter().any(|&a| self.debug_axis(a).is_some())
     }
 
     /// Sets the time axis and the sample rate together — they're derived from
@@ -135,21 +195,27 @@ impl FlightData {
     }
 
     /// Pre-filter gyro — what the noise analysis wants.
-    pub fn gyro_raw(&self, axis: usize) -> Option<&[f64]> {
+    pub fn gyro_raw(&self, axis: Axis) -> Option<&[f64]> {
         self.channel(Channel::RawGyro(axis))
     }
 
     /// Post-filter gyro, i.e. `gyroADC` — what the PID loop actually saw.
-    pub fn gyro(&self, axis: usize) -> Option<&[f64]> {
+    pub fn gyro(&self, axis: Axis) -> Option<&[f64]> {
         self.channel(Channel::Gyro(axis))
     }
 
-    pub fn setpoint(&self, axis: usize) -> Option<&[f64]> {
+    pub fn setpoint(&self, axis: Axis) -> Option<&[f64]> {
         self.channel(Channel::Setpoint(axis))
     }
 
     pub fn debug(&self, index: usize) -> Option<&[f64]> {
         self.channel(Channel::Debug(index))
+    }
+
+    /// Under debug mode `FFT_FREQ`, `debug[0..3]` is the dynamic notch
+    /// tracker's center frequency for that axis.
+    pub fn debug_axis(&self, axis: Axis) -> Option<&[f64]> {
+        self.debug(axis.index())
     }
 
     pub fn vbat(&self) -> Option<&[f64]> {
@@ -164,9 +230,8 @@ impl FlightData {
         self.channel(Channel::Rssi)
     }
 
-    /// Betaflight logs throttle as `rcCommand[3]`.
     pub fn throttle(&self) -> Option<&[f64]> {
-        self.channel(Channel::RcCommand(3))
+        self.channel(Channel::Throttle)
     }
 }
 
@@ -174,11 +239,12 @@ impl FlightData {
 mod test {
     use super::*;
 
+    /// Throttle shares storage with the stick channels — it is `rcCommand[3]`.
     #[test]
-    fn throttle_is_rc_command_channel_3() {
-        let fd =
-            FlightData::default().with_channel(Channel::RcCommand(3), vec![0.0, 500.0, 1000.0]);
+    fn throttle_is_the_fourth_stick_channel() {
+        let fd = FlightData::default().with_channel(Channel::Throttle, vec![0.0, 500.0, 1000.0]);
         assert_eq!(fd.throttle(), Some(&[0.0, 500.0, 1000.0][..]));
+        assert_eq!(fd.channel(Channel::RcCommand(Axis::Roll)), None);
     }
 
     #[test]
@@ -189,17 +255,20 @@ mod test {
     #[test]
     fn raw_and_filtered_gyro_are_separate_channels_per_axis() {
         let fd = FlightData::default()
-            .with_channel(Channel::RawGyro(1), vec![10.0])
-            .with_channel(Channel::Gyro(1), vec![8.0]);
+            .with_channel(Channel::RawGyro(Axis::Pitch), vec![10.0])
+            .with_channel(Channel::Gyro(Axis::Pitch), vec![8.0]);
 
-        assert_eq!(fd.gyro_raw(1), Some(&[10.0][..]));
-        assert_eq!(fd.gyro(1), Some(&[8.0][..]));
-        assert_eq!(fd.gyro_raw(0), None);
+        assert_eq!(fd.gyro_raw(Axis::Pitch), Some(&[10.0][..]));
+        assert_eq!(fd.gyro(Axis::Pitch), Some(&[8.0][..]));
+        assert_eq!(fd.gyro_raw(Axis::Roll), None);
     }
 
+    /// Only the index-carrying channels can be out of range; `Axis` cannot.
     #[test]
     fn channel_out_of_range_is_absent() {
-        assert_eq!(FlightData::default().gyro_raw(9), None);
+        let fd = FlightData::default().with_channel(Channel::Debug(99), vec![1.0]);
+        assert_eq!(fd.debug(99), None);
+        assert_eq!(fd.channel(Channel::Motor(9)), None);
     }
 
     /// Logs start at an arbitrary flight-controller uptime, not at zero.

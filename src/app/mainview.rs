@@ -3,14 +3,13 @@ use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 use elegance::Slider;
 
 use crate::analysis::SpectralAnalysis;
-use crate::parser::FlightData;
+use crate::parser::{Axis, FlightData, PerAxis};
 
 use super::BlackbirdApp;
 use super::ui::heatmap::{Heatmap, HeatmapOrientation, OverlaySeries};
 use super::ui::timeseries_plot::{Series, TimeseriesPlot};
 
-const GYRO_AXIS_NAMES: [&str; 3] = ["roll", "pitch", "yaw"];
-const GYRO_AXIS_COLORS: [Color32; 3] = [Color32::RED, Color32::GREEN, Color32::BLUE];
+const GYRO_AXIS_COLORS: PerAxis<Color32> = PerAxis([Color32::RED, Color32::GREEN, Color32::BLUE]);
 const GYRO_RAW_COLOR: Color32 = Color32::GRAY;
 const VBAT_COLOR: Color32 = Color32::from_rgb(255, 202, 40);
 const CURRENT_COLOR: Color32 = Color32::from_rgb(255, 111, 97);
@@ -177,41 +176,41 @@ impl BlackbirdApp {
     fn show_gyro_plots(
         ui: &mut egui::Ui,
         fd: &FlightData,
-        filtered_visible: &mut [bool; 3],
-        raw_visible: &mut [bool; 3],
+        filtered_visible: &mut PerAxis<bool>,
+        raw_visible: &mut PerAxis<bool>,
     ) {
         let t0 = fd.start_us();
         let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
-        for i in 0..3 {
-            let Some(raw) = fd.gyro_raw(i) else {
+        for axis in Axis::ALL {
+            let Some(raw) = fd.gyro_raw(axis) else {
                 continue;
             };
 
-            ui.label(RichText::new(GYRO_AXIS_NAMES[i]).strong());
+            ui.label(RichText::new(axis.name()).strong());
 
             let mut series = vec![Series {
-                label: format!("{} (raw)", GYRO_AXIS_NAMES[i]),
+                label: format!("{} (raw)", axis.name()),
                 color: GYRO_RAW_COLOR,
                 time_us: fd.time_us(),
                 samples: raw,
-                visible: raw_visible[i],
+                visible: raw_visible[axis],
             }];
 
-            if let Some(filtered) = fd.gyro(i) {
+            if let Some(filtered) = fd.gyro(axis) {
                 series.push(Series {
-                    label: format!("{} (filtered)", GYRO_AXIS_NAMES[i]),
-                    color: GYRO_AXIS_COLORS[i],
+                    label: format!("{} (filtered)", axis.name()),
+                    color: GYRO_AXIS_COLORS[axis],
                     time_us: fd.time_us(),
                     samples: filtered,
-                    visible: filtered_visible[i],
+                    visible: filtered_visible[axis],
                 });
             }
 
             let mut plot = TimeseriesPlot {
-                id: format!("gyro_plot_{}", GYRO_AXIS_NAMES[i]),
+                id: format!("gyro_plot_{}", axis.name()),
                 y_label: "deg/s".to_string(),
                 t0,
                 series,
@@ -220,49 +219,49 @@ impl BlackbirdApp {
             };
             plot.show(ui);
 
-            raw_visible[i] = plot.series[0].visible;
-            filtered_visible[i] = plot.series[1].visible;
+            raw_visible[axis] = plot.series[0].visible;
+            filtered_visible[axis] = plot.series[1].visible;
         }
     }
 
     fn show_gyro_vs_setpoint_plots(
         ui: &mut egui::Ui,
         fd: &FlightData,
-        gyro_visible: &mut [bool; 3],
-        setpoint_visible: &mut [bool; 3],
+        gyro_visible: &mut PerAxis<bool>,
+        setpoint_visible: &mut PerAxis<bool>,
     ) {
         let t0 = fd.start_us();
         let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
-        for i in 0..3 {
-            let Some(gyro) = fd.gyro(i) else {
+        for axis in Axis::ALL {
+            let Some(gyro) = fd.gyro(axis) else {
                 continue;
             };
 
-            ui.label(RichText::new(GYRO_AXIS_NAMES[i]).strong());
+            ui.label(RichText::new(axis.name()).strong());
 
             let mut series = vec![Series {
-                label: format!("{} (gyro)", GYRO_AXIS_NAMES[i]),
-                color: GYRO_AXIS_COLORS[i],
+                label: format!("{} (gyro)", axis.name()),
+                color: GYRO_AXIS_COLORS[axis],
                 time_us: fd.time_us(),
                 samples: gyro,
-                visible: gyro_visible[i],
+                visible: gyro_visible[axis],
             }];
 
-            if let Some(setpoint) = fd.setpoint(i) {
+            if let Some(setpoint) = fd.setpoint(axis) {
                 series.push(Series {
-                    label: format!("{} (setpoint)", GYRO_AXIS_NAMES[i]),
+                    label: format!("{} (setpoint)", axis.name()),
                     color: SETPOINT_COLOR,
                     time_us: fd.time_us(),
                     samples: setpoint,
-                    visible: setpoint_visible[i],
+                    visible: setpoint_visible[axis],
                 });
             }
 
             let mut plot = TimeseriesPlot {
-                id: format!("gyro_vs_setpoint_plot_{}", GYRO_AXIS_NAMES[i]),
+                id: format!("gyro_vs_setpoint_plot_{}", axis.name()),
                 y_label: "deg/s".to_string(),
                 t0,
                 series,
@@ -271,9 +270,9 @@ impl BlackbirdApp {
             };
             plot.show(ui);
 
-            gyro_visible[i] = plot.series[0].visible;
+            gyro_visible[axis] = plot.series[0].visible;
             if let Some(setpoint_series) = plot.series.get(1) {
-                setpoint_visible[i] = setpoint_series.visible;
+                setpoint_visible[axis] = setpoint_series.visible;
             }
         }
     }
@@ -436,17 +435,17 @@ impl BlackbirdApp {
         let t0 = fd.start_us();
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
-        for i in 0..3 {
-            let Some(axis) = &analysis.axes[i] else {
+        for axis in Axis::ALL {
+            let Some(spec) = analysis.axis(axis) else {
                 continue;
             };
-            let Some(time_map) = &axis.time_map else {
+            let Some(time_map) = &spec.time_map else {
                 continue;
             };
 
-            ui.label(RichText::new(format!("{} spectrogram", GYRO_AXIS_NAMES[i])).strong());
+            ui.label(RichText::new(format!("{} spectrogram", axis.name())).strong());
             let overlay = has_dyn_notch_trace
-                .then(|| fd.debug(i))
+                .then(|| fd.debug_axis(axis))
                 .flatten()
                 .map(|samples| OverlaySeries {
                     t0,
@@ -454,7 +453,7 @@ impl BlackbirdApp {
                     samples,
                 });
             Heatmap {
-                id: format!("spectrogram_{}", GYRO_AXIS_NAMES[i]),
+                id: format!("spectrogram_{}", axis.name()),
                 orientation: HeatmapOrientation::VsTime,
                 spectrum: time_map,
                 height: plot_height,
@@ -468,36 +467,36 @@ impl BlackbirdApp {
     fn show_psd_tab(
         ui: &mut egui::Ui,
         analysis: &SpectralAnalysis,
-        filtered_visible: &mut [bool; 3],
+        filtered_visible: &mut PerAxis<bool>,
     ) {
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
-        for i in 0..3 {
-            let Some(axis) = &analysis.axes[i] else {
+        for axis in Axis::ALL {
+            let Some(spec) = analysis.axis(axis) else {
                 continue;
             };
 
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} psd", GYRO_AXIS_NAMES[i])).strong());
-                ui.checkbox(&mut filtered_visible[i], "show filtered");
+                ui.label(RichText::new(format!("{} psd", axis.name())).strong());
+                ui.checkbox(&mut filtered_visible[axis], "show filtered");
             });
 
-            Plot::new(format!("psd_plot_{}", GYRO_AXIS_NAMES[i]))
+            Plot::new(format!("psd_plot_{}", axis.name()))
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("dB")
                 .show(ui, |plot_ui| {
-                    let raw_points: PlotPoints = axis
+                    let raw_points: PlotPoints = spec
                         .raw_psd
                         .freq_hz
                         .iter()
-                        .zip(&axis.raw_psd.power_db)
+                        .zip(&spec.raw_psd.power_db)
                         .map(|(&f, &v)| [f, v])
                         .collect();
                     plot_ui.line(Line::new("raw", raw_points).color(GYRO_RAW_COLOR));
 
-                    if filtered_visible[i]
-                        && let Some(filtered_psd) = &axis.filtered_psd
+                    if filtered_visible[axis]
+                        && let Some(filtered_psd) = &spec.filtered_psd
                     {
                         let filtered_points: PlotPoints = filtered_psd
                             .freq_hz
@@ -506,7 +505,7 @@ impl BlackbirdApp {
                             .map(|(&f, &v)| [f, v])
                             .collect();
                         plot_ui.line(
-                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[i]),
+                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[axis]),
                         );
                     }
 
@@ -521,7 +520,7 @@ impl BlackbirdApp {
                         );
                     }
 
-                    for peak in &axis.peaks {
+                    for peak in &spec.peaks {
                         let label = match peak.harmonic_of {
                             Some(_) => format!("{:.0} Hz (harmonic)", peak.freq_hz),
                             None => format!("{:.0} Hz", peak.freq_hz),
@@ -548,7 +547,7 @@ impl BlackbirdApp {
     fn show_frequency_tab(
         ui: &mut egui::Ui,
         analysis: &SpectralAnalysis,
-        filtered_visible: &mut [bool; 3],
+        filtered_visible: &mut PerAxis<bool>,
         peak_min_hz: &mut f32,
     ) {
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
@@ -560,18 +559,18 @@ impl BlackbirdApp {
         );
         ui.add_space(4.0);
 
-        for i in 0..3 {
-            let Some(axis) = &analysis.axes[i] else {
+        for axis in Axis::ALL {
+            let Some(spec) = analysis.axis(axis) else {
                 continue;
             };
-            let raw_spectrum = &axis.raw_spectrum;
+            let raw_spectrum = &spec.raw_spectrum;
 
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} frequency", GYRO_AXIS_NAMES[i])).strong());
-                ui.checkbox(&mut filtered_visible[i], "show filtered");
+                ui.label(RichText::new(format!("{} frequency", axis.name())).strong());
+                ui.checkbox(&mut filtered_visible[axis], "show filtered");
             });
 
-            Plot::new(format!("frequency_plot_{}", GYRO_AXIS_NAMES[i]))
+            Plot::new(format!("frequency_plot_{}", axis.name()))
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("magnitude")
@@ -601,8 +600,8 @@ impl BlackbirdApp {
                         );
                     }
 
-                    if filtered_visible[i]
-                        && let Some(filtered_spectrum) = &axis.filtered_spectrum
+                    if filtered_visible[axis]
+                        && let Some(filtered_spectrum) = &spec.filtered_spectrum
                     {
                         let filtered_points: PlotPoints = filtered_spectrum
                             .freq_hz
@@ -611,7 +610,7 @@ impl BlackbirdApp {
                             .map(|(&f, &v)| [f, v])
                             .collect();
                         plot_ui.line(
-                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[i]),
+                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[axis]),
                         );
                     }
                 });
@@ -628,17 +627,17 @@ impl BlackbirdApp {
 
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
-        for i in 0..3 {
-            let Some(axis) = &analysis.axes[i] else {
+        for axis in Axis::ALL {
+            let Some(spec) = analysis.axis(axis) else {
                 continue;
             };
-            let Some(throttle_map) = &axis.throttle_map else {
+            let Some(throttle_map) = &spec.throttle_map else {
                 continue;
             };
 
-            ui.label(RichText::new(format!("{} vs throttle", GYRO_AXIS_NAMES[i])).strong());
+            ui.label(RichText::new(format!("{} vs throttle", axis.name())).strong());
             Heatmap {
-                id: format!("throttle_heatmap_{}", GYRO_AXIS_NAMES[i]),
+                id: format!("throttle_heatmap_{}", axis.name()),
                 orientation: HeatmapOrientation::VsThrottle,
                 spectrum: throttle_map,
                 height: plot_height,
