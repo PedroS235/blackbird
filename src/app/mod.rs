@@ -1,10 +1,9 @@
 mod log_store;
-mod mainview;
 mod notification;
 mod sidepanel;
+mod tabs;
 pub(crate) mod theme;
 mod ui;
-mod view_state;
 
 use std::{collections::VecDeque, sync::mpsc};
 
@@ -14,9 +13,8 @@ use elegance::ProgressBar;
 use crate::{
     app::{
         log_store::{LoadState, LogStore},
-        mainview::{FilterAnalysisTab, MainTab, PidAnalysisTab, TimeseriesTab},
         notification::Notification,
-        view_state::MainViewState,
+        tabs::Tabs,
     },
     loader::{LoadEvent, LogLoader},
 };
@@ -28,11 +26,7 @@ pub struct BlackbirdApp {
     logs: LogStore,
     notifications: VecDeque<Notification>,
     load_state: LoadState,
-    main_tab: MainTab,
-    timeseries_tab: TimeseriesTab,
-    pidanalysis_tab: PidAnalysisTab,
-    filteranalysis_tab: FilterAnalysisTab,
-    view_state: MainViewState,
+    tabs: Tabs,
 }
 
 impl Default for BlackbirdApp {
@@ -42,11 +36,7 @@ impl Default for BlackbirdApp {
             logs: Default::default(),
             notifications: Default::default(),
             load_state: LoadState::Idle,
-            main_tab: MainTab::default(),
-            timeseries_tab: TimeseriesTab::default(),
-            pidanalysis_tab: PidAnalysisTab::default(),
-            filteranalysis_tab: FilterAnalysisTab::default(),
-            view_state: MainViewState::default(),
+            tabs: Tabs::default(),
         }
     }
 }
@@ -58,7 +48,7 @@ impl App for BlackbirdApp {
 
         self.show_sidepanel(ui);
         self.show_notifications(ui);
-        self.show_mainview(ui);
+        self.tabs.show(ui, self.logs.current_flight());
     }
 }
 
