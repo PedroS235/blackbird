@@ -90,9 +90,8 @@ impl BlackbirdApp {
             .current_flight()
             .map(|(parsed, _)| &parsed.flight_data);
 
-        let has_battery_data =
-            selected_fd.is_some_and(|fd| fd.vbat.is_some() || fd.current.is_some());
-        let has_rssi_data = selected_fd.is_some_and(|fd| fd.rssi.is_some());
+        let has_battery_data = selected_fd.is_some_and(|fd| fd.has_power());
+        let has_rssi_data = selected_fd.is_some_and(|fd| fd.has_rssi());
 
         if self.timeseries_tab == TimeseriesTab::PowerBattery && !has_battery_data {
             self.timeseries_tab = TimeseriesTab::Gyro;
@@ -181,18 +180,13 @@ impl BlackbirdApp {
         filtered_visible: &mut [bool; 3],
         raw_visible: &mut [bool; 3],
     ) {
-        let t0 = fd.time_us.first().copied().unwrap_or(0);
-        let duration_s = fd
-            .time_us
-            .last()
-            .map(|&last| last.saturating_sub(t0) as f64 / 1_000_000.0)
-            .unwrap_or(1.0)
-            .max(f64::MIN_POSITIVE);
+        let t0 = fd.start_us();
+        let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
         for i in 0..3 {
-            let Some(raw) = &fd.raw_gyro[i] else {
+            let Some(raw) = fd.gyro_raw(i) else {
                 continue;
             };
 
@@ -201,17 +195,17 @@ impl BlackbirdApp {
             let mut series = vec![Series {
                 label: format!("{} (raw)", GYRO_AXIS_NAMES[i]),
                 color: GYRO_RAW_COLOR,
-                time_us: fd.time_us.as_slice(),
-                samples: raw.as_slice(),
+                time_us: fd.time_us(),
+                samples: raw,
                 visible: raw_visible[i],
             }];
 
-            if let Some(filtered) = &fd.gyro[i] {
+            if let Some(filtered) = fd.gyro(i) {
                 series.push(Series {
                     label: format!("{} (filtered)", GYRO_AXIS_NAMES[i]),
                     color: GYRO_AXIS_COLORS[i],
-                    time_us: fd.time_us.as_slice(),
-                    samples: filtered.as_slice(),
+                    time_us: fd.time_us(),
+                    samples: filtered,
                     visible: filtered_visible[i],
                 });
             }
@@ -237,18 +231,13 @@ impl BlackbirdApp {
         gyro_visible: &mut [bool; 3],
         setpoint_visible: &mut [bool; 3],
     ) {
-        let t0 = fd.time_us.first().copied().unwrap_or(0);
-        let duration_s = fd
-            .time_us
-            .last()
-            .map(|&last| last.saturating_sub(t0) as f64 / 1_000_000.0)
-            .unwrap_or(1.0)
-            .max(f64::MIN_POSITIVE);
+        let t0 = fd.start_us();
+        let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
         for i in 0..3 {
-            let Some(gyro) = &fd.gyro[i] else {
+            let Some(gyro) = fd.gyro(i) else {
                 continue;
             };
 
@@ -257,17 +246,17 @@ impl BlackbirdApp {
             let mut series = vec![Series {
                 label: format!("{} (gyro)", GYRO_AXIS_NAMES[i]),
                 color: GYRO_AXIS_COLORS[i],
-                time_us: fd.time_us.as_slice(),
-                samples: gyro.as_slice(),
+                time_us: fd.time_us(),
+                samples: gyro,
                 visible: gyro_visible[i],
             }];
 
-            if let Some(setpoint) = &fd.setpoint[i] {
+            if let Some(setpoint) = fd.setpoint(i) {
                 series.push(Series {
                     label: format!("{} (setpoint)", GYRO_AXIS_NAMES[i]),
                     color: SETPOINT_COLOR,
-                    time_us: fd.time_us.as_slice(),
-                    samples: setpoint.as_slice(),
+                    time_us: fd.time_us(),
+                    samples: setpoint,
                     visible: setpoint_visible[i],
                 });
             }
@@ -295,22 +284,17 @@ impl BlackbirdApp {
         vbat_visible: &mut bool,
         current_visible: &mut bool,
     ) {
-        let t0 = fd.time_us.first().copied().unwrap_or(0);
-        let duration_s = fd
-            .time_us
-            .last()
-            .map(|&last| last.saturating_sub(t0) as f64 / 1_000_000.0)
-            .unwrap_or(1.0)
-            .max(f64::MIN_POSITIVE);
+        let t0 = fd.start_us();
+        let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
-        let metric_count = [fd.vbat.is_some(), fd.current.is_some()]
+        let metric_count = [fd.vbat().is_some(), fd.current().is_some()]
             .iter()
             .filter(|present| **present)
             .count()
             .max(1);
         let plot_height = (ui.available_height() / metric_count as f32 - 24.0).max(80.0);
 
-        if let Some(vbat) = &fd.vbat {
+        if let Some(vbat) = fd.vbat() {
             ui.label(RichText::new("Battery Voltage").strong());
             let mut plot = TimeseriesPlot {
                 id: "power_vbat_plot".to_string(),
@@ -319,8 +303,8 @@ impl BlackbirdApp {
                 series: vec![Series {
                     label: "vbat".to_string(),
                     color: VBAT_COLOR,
-                    time_us: fd.time_us.as_slice(),
-                    samples: vbat.as_slice(),
+                    time_us: fd.time_us(),
+                    samples: vbat,
                     visible: *vbat_visible,
                 }],
                 default_x_range: Some((0.0, duration_s)),
@@ -330,7 +314,7 @@ impl BlackbirdApp {
             *vbat_visible = plot.series[0].visible;
         }
 
-        if let Some(current) = &fd.current {
+        if let Some(current) = fd.current() {
             ui.label(RichText::new("Current").strong());
             let mut plot = TimeseriesPlot {
                 id: "power_current_plot".to_string(),
@@ -339,8 +323,8 @@ impl BlackbirdApp {
                 series: vec![Series {
                     label: "current".to_string(),
                     color: CURRENT_COLOR,
-                    time_us: fd.time_us.as_slice(),
-                    samples: current.as_slice(),
+                    time_us: fd.time_us(),
+                    samples: current,
                     visible: *current_visible,
                 }],
                 default_x_range: Some((0.0, duration_s)),
@@ -352,17 +336,12 @@ impl BlackbirdApp {
     }
 
     fn show_rssi_plot(ui: &mut egui::Ui, fd: &FlightData, rssi_visible: &mut bool) {
-        let Some(rssi) = &fd.rssi else {
+        let Some(rssi) = fd.rssi() else {
             return;
         };
 
-        let t0 = fd.time_us.first().copied().unwrap_or(0);
-        let duration_s = fd
-            .time_us
-            .last()
-            .map(|&last| last.saturating_sub(t0) as f64 / 1_000_000.0)
-            .unwrap_or(1.0)
-            .max(f64::MIN_POSITIVE);
+        let t0 = fd.start_us();
+        let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
 
         ui.label(RichText::new("RSSI").strong());
         let mut plot = TimeseriesPlot {
@@ -372,8 +351,8 @@ impl BlackbirdApp {
             series: vec![Series {
                 label: "rssi".to_string(),
                 color: RSSI_COLOR,
-                time_us: fd.time_us.as_slice(),
-                samples: rssi.as_slice(),
+                time_us: fd.time_us(),
+                samples: rssi,
                 visible: *rssi_visible,
             }],
             default_x_range: Some((0.0, duration_s)),
@@ -389,8 +368,7 @@ impl BlackbirdApp {
             return;
         };
         let fd = &parsed.flight_data;
-        let has_dyn_notch_trace =
-            parsed.metadata.debug_mode == "FFT_FREQ" && fd.debug[0..3].iter().any(Option::is_some);
+        let has_dyn_notch_trace = parsed.metadata.debug_mode == "FFT_FREQ" && fd.has_debug_axes();
 
         ui.horizontal(|ui| {
             for (tab, label) in [
@@ -455,7 +433,7 @@ impl BlackbirdApp {
         );
         ui.add_space(4.0);
 
-        let t0 = fd.time_us.first().copied().unwrap_or(0);
+        let t0 = fd.start_us();
         let plot_height = (ui.available_height() / 3.0 - 24.0).max(80.0);
 
         for i in 0..3 {
@@ -468,11 +446,11 @@ impl BlackbirdApp {
 
             ui.label(RichText::new(format!("{} spectrogram", GYRO_AXIS_NAMES[i])).strong());
             let overlay = has_dyn_notch_trace
-                .then(|| fd.debug[i].as_deref())
+                .then(|| fd.debug(i))
                 .flatten()
                 .map(|samples| OverlaySeries {
                     t0,
-                    time_us: fd.time_us.as_slice(),
+                    time_us: fd.time_us(),
                     samples,
                 });
             Heatmap {

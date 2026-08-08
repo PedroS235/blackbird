@@ -75,19 +75,13 @@ pub struct SpectralAnalysis {
 
 impl GyroNoiseAnalyzer {
     pub fn analyze(&self, fd: &FlightData, metadata: &Metadata) -> SpectralAnalysis {
-        let fs = fd.sample_rate.rate_hz as f64;
-        let throttle = fd.rc_command[3].as_deref();
-        let t0 = fd.time_us.first().copied().unwrap_or(0);
-        let time_ref: Vec<f64> = fd
-            .time_us
-            .iter()
-            .map(|&t| t.saturating_sub(t0) as f64 / 1_000_000.0)
-            .collect();
+        let fs = fd.sample_rate_hz();
+        let throttle = fd.throttle();
+        let time_ref = fd.time_s();
 
         let axes = std::array::from_fn(|i| {
-            fd.raw_gyro[i]
-                .as_deref()
-                .map(|raw| self.analyze_axis(raw, fd.gyro[i].as_deref(), throttle, &time_ref, fs))
+            fd.gyro_raw(i)
+                .map(|raw| self.analyze_axis(raw, fd.gyro(i), throttle, &time_ref, fs))
         });
 
         SpectralAnalysis {
@@ -238,6 +232,59 @@ impl GyroNoiseAnalyzer {
         }
 
         markers
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::parser::Channel;
+
+    /// 200 Hz sine on roll's pre-filter gyro, nothing on pitch/yaw.
+    fn one_axis_log(freq_hz: f64, fs: f64, samples: usize) -> FlightData {
+        let dt_us = (1e6 / fs) as u64;
+        let sine = (0..samples)
+            .map(|i| (std::f64::consts::TAU * freq_hz * i as f64 / fs).sin() * 50.0)
+            .collect();
+        FlightData::default()
+            .with_time((0..samples as u64).map(|i| 7_000_000 + i * dt_us).collect())
+            .with_channel(Channel::RawGyro(0), sine)
+    }
+
+    #[test]
+    fn analyze_reports_the_injected_noise_frequency() {
+        let analysis = GyroNoiseAnalyzer::default()
+            .analyze(&one_axis_log(200.0, 2000.0, 8192), &Metadata::default());
+
+        let roll = analysis.axes[0].as_ref().expect("roll analysed");
+        let loudest = roll
+            .peaks
+            .iter()
+            .max_by(|a, b| a.amplitude_db.total_cmp(&b.amplitude_db))
+            .expect("a peak was found");
+
+        assert!(
+            (loudest.freq_hz - 200.0).abs() < 10.0,
+            "expected peak near 200 Hz, got {} Hz",
+            loudest.freq_hz
+        );
+    }
+
+    #[test]
+    fn axes_without_raw_gyro_are_not_analysed() {
+        let analysis = GyroNoiseAnalyzer::default()
+            .analyze(&one_axis_log(200.0, 2000.0, 2048), &Metadata::default());
+
+        assert!(analysis.axes[1].is_none());
+        assert!(analysis.axes[2].is_none());
+    }
+
+    #[test]
+    fn throttle_map_absent_when_throttle_not_logged() {
+        let analysis = GyroNoiseAnalyzer::default()
+            .analyze(&one_axis_log(200.0, 2000.0, 2048), &Metadata::default());
+
+        assert!(analysis.axes[0].as_ref().unwrap().throttle_map.is_none());
     }
 }
 
