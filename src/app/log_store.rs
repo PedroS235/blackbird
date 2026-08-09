@@ -83,6 +83,20 @@ impl LogStore {
             .enumerate()
             .map(move |(i, loaded)| (i, loaded, selected == Some(i)))
     }
+
+    /// Removes a log and keeps `selected` pointing at the same log it did
+    /// before (shifted down if it sat after `index`), falling back to the
+    /// next log — or `None` once the store is empty — when `index` itself
+    /// was selected.
+    pub(super) fn remove(&mut self, index: usize) {
+        debug_assert!(index < self.logs.len());
+        self.logs.remove(index);
+        self.selected = match self.selected {
+            Some(sel) if sel == index => (!self.logs.is_empty()).then_some(sel.min(self.logs.len() - 1)),
+            Some(sel) if sel > index => Some(sel - 1),
+            sel => sel,
+        };
+    }
 }
 
 #[cfg(test)]

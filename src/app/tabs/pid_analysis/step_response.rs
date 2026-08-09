@@ -7,7 +7,7 @@ use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 use crate::analysis::{
     AxisStepResponse, NoStepResponse, StepMetrics, StepResponseAnalysis, StepResponseAnalyzer,
 };
-use crate::app::tabs::{GYRO_AXIS_COLORS, TabCtx, stacked_plot_height};
+use crate::app::tabs::{TabCtx, get_axis_color, stacked_plot_height};
 use crate::parser::Axis;
 
 /// Individual traces are background: the eye should read the spread as a band,
@@ -353,7 +353,7 @@ fn show_axis(
     height: f32,
     show_individual: bool,
 ) {
-    let color = GYRO_AXIS_COLORS[axis];
+    let color = get_axis_color(axis);
 
     ui.horizontal(|ui| {
         ui.label(RichText::new(axis.name()).strong());

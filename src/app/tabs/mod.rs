@@ -2,19 +2,24 @@ mod filter_analysis;
 mod pid_analysis;
 mod timeseries;
 
+use blackbird::parser::Axis;
 use egui::{Color32, Ui};
-use elegance::Accent;
 
 use crate::analysis::Analysis;
-use crate::parser::{FlightData, Metadata, ParsedLog, PerAxis};
+use crate::parser::{FlightData, Metadata, ParsedLog};
 
 use filter_analysis::FilterAnalysis;
 use pid_analysis::PidAnalysis;
 use timeseries::Timeseries;
 
-pub(super) const GYRO_AXIS_COLORS: PerAxis<Color32> =
-    PerAxis([Color32::RED, Color32::GREEN, Color32::BLUE]);
-pub(super) const GYRO_RAW_COLOR: Color32 = Color32::GRAY;
+pub(super) fn get_axis_color(axis: Axis) -> Color32 {
+    // TODO: retrive from current theme and not fixed pallete
+    match axis {
+        Axis::Roll => elegance::Palette::charcoal().red,
+        Axis::Pitch => elegance::Palette::charcoal().green,
+        Axis::Yaw => elegance::Palette::charcoal().blue,
+    }
+}
 
 /// What every tab is handed. Raw data only — a predicate derived from it stays
 /// with whoever reads it, so this stays the one place a new kind of shared data

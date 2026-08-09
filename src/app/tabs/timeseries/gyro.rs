@@ -1,6 +1,6 @@
 use egui::{RichText, Ui};
 
-use crate::app::tabs::{GYRO_AXIS_COLORS, GYRO_RAW_COLOR, stacked_plot_height};
+use crate::app::tabs::{get_axis_color, stacked_plot_height};
 use crate::app::ui::timeseries_plot::{Series, TimeseriesPlot};
 use crate::parser::{Axis, FlightData};
 
@@ -66,7 +66,7 @@ pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
         if let Some(raw) = fd.gyro_raw(axis) {
             series.push(Series {
                 label: format!("{} (raw)", axis.name()),
-                color: GYRO_RAW_COLOR,
+                color: elegance::Palette::charcoal().text_faint,
                 time_us: fd.time_us(),
                 samples: raw,
             });
@@ -75,7 +75,7 @@ pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
         if let Some(filtered) = fd.gyro(axis) {
             series.push(Series {
                 label: format!("{} (filtered)", axis.name()),
-                color: GYRO_AXIS_COLORS[axis],
+                color: get_axis_color(axis),
                 time_us: fd.time_us(),
                 samples: filtered,
             });

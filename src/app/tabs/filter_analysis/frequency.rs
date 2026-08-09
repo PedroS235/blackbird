@@ -4,7 +4,7 @@ use elegance::Slider;
 
 use super::{PEAK_MARKER_COLOR, drawn_axes};
 use crate::analysis::SpectralAnalysis;
-use crate::app::tabs::{GYRO_AXIS_COLORS, GYRO_RAW_COLOR, stacked_plot_height};
+use crate::app::tabs::{get_axis_color, stacked_plot_height};
 use crate::parser::{Axis, PerAxis};
 
 /// Welch-averaged linear magnitude — no dB, chunked and averaged like the
@@ -58,7 +58,10 @@ impl Frequency {
                         .zip(&raw_spectrum.magnitude)
                         .map(|(&f, &v)| [f, v])
                         .collect();
-                    plot_ui.line(Line::new("raw", raw_points).color(GYRO_RAW_COLOR));
+                    plot_ui.line(
+                        Line::new("raw", raw_points)
+                            .color(elegance::Palette::charcoal().text_faint),
+                    );
 
                     if let Some((freq, mag)) = spectrum_peak(
                         &raw_spectrum.freq_hz,
@@ -87,7 +90,7 @@ impl Frequency {
                             .map(|(&f, &v)| [f, v])
                             .collect();
                         plot_ui.line(
-                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[axis]),
+                            Line::new("filtered", filtered_points).color(get_axis_color(axis)),
                         );
                     }
                 });

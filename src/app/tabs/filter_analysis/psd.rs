@@ -3,7 +3,7 @@ use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 
 use super::{PEAK_MARKER_COLOR, drawn_axes};
 use crate::analysis::SpectralAnalysis;
-use crate::app::tabs::{GYRO_AXIS_COLORS, GYRO_RAW_COLOR, stacked_plot_height};
+use crate::app::tabs::{get_axis_color, stacked_plot_height};
 use crate::parser::{Axis, PerAxis};
 
 const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
@@ -42,7 +42,10 @@ impl Psd {
                         .zip(&spec.raw_psd.power_db)
                         .map(|(&f, &v)| [f, v])
                         .collect();
-                    plot_ui.line(Line::new("raw", raw_points).color(GYRO_RAW_COLOR));
+                    plot_ui.line(
+                        Line::new("raw", raw_points)
+                            .color(elegance::Palette::charcoal().text_faint),
+                    );
 
                     if self.filtered_visible[axis]
                         && let Some(filtered_psd) = &spec.filtered_psd
@@ -54,7 +57,7 @@ impl Psd {
                             .map(|(&f, &v)| [f, v])
                             .collect();
                         plot_ui.line(
-                            Line::new("filtered", filtered_points).color(GYRO_AXIS_COLORS[axis]),
+                            Line::new("filtered", filtered_points).color(get_axis_color(axis)),
                         );
                     }
 

@@ -1,6 +1,6 @@
 use egui::{Color32, RichText, Ui};
 
-use crate::app::tabs::{GYRO_AXIS_COLORS, stacked_plot_height};
+use crate::app::tabs::{get_axis_color, stacked_plot_height};
 use crate::app::ui::timeseries_plot::{Series, TimeseriesPlot};
 use crate::parser::{Axis, FlightData};
 
@@ -31,7 +31,7 @@ pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
 
         let mut series = vec![Series {
             label: format!("{} (gyro)", axis.name()),
-            color: GYRO_AXIS_COLORS[axis],
+            color: get_axis_color(axis),
             time_us: fd.time_us(),
             samples: gyro,
         }];
