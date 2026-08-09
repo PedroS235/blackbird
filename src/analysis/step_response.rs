@@ -34,6 +34,11 @@ pub struct StepResponseAnalyzer {
     /// zero it carries no gain to normalise by, high it is a deconvolution
     /// blow-up, negative it is upside down and would subtract from the mean.
     pub steady_state_band: RangeInclusive<f64>,
+    /// How many traces are kept for the band the panel draws. A field rather
+    /// than a knob: past a hundred traces the band is pixel-for-pixel the same
+    /// and this changes only memory, never the answer — the mean is always
+    /// accumulated over every window.
+    pub max_traces: usize,
 }
 
 impl Default for StepResponseAnalyzer {
@@ -46,19 +51,147 @@ impl Default for StepResponseAnalyzer {
             response_ms: 500.0,
             tail_ms: 100.0,
             steady_state_band: 0.5..=3.0,
+            max_traces: 200,
         }
     }
 }
 
-/// One axis' worth of step responses: every surviving window's trace, plus
-/// their pointwise mean. The spread across traces is itself diagnostic, so
-/// both are kept.
+/// The curve read as the numbers a pilot would say out loud. Measured on the
+/// mean, so the figure and the drawn picture can never disagree.
+///
+/// No settling time: a 500 ms window averaged from as few as forty traces
+/// cannot support one, and a figure that moves whenever the stick mask moves
+/// reads as precision that is not there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepMetrics {
+    /// Peak above the steady state, in percent. Traces are normalised to a
+    /// steady state of 1, so a peak of 1.18 reads as 18.
+    pub overshoot_pct: f64,
+    /// When that peak lands — a slow craft from a fast one.
+    pub peak_ms: f64,
+    /// Time to half the commanded rate: how much of the tune is latency
+    /// rather than gain. Every trace is normalised by its own tail, so the
+    /// mean always settles at 1 and always crosses half of it.
+    pub delay_ms: f64,
+    /// Interquartile range of the *individual* responses' overshoot, in the
+    /// same percent. Not a confidence interval around `overshoot_pct`: peaks
+    /// land at slightly different times, so averaging flattens them and the
+    /// mean's peak normally sits below the middle of this range. What it says
+    /// is how much the responses behind the curve disagree — a range rather
+    /// than a ± because the distribution is not symmetric.
+    pub spread_pct: RangeInclusive<f64>,
+}
+
+impl StepMetrics {
+    /// The peak this reports on the normalised curve, for drawing a marker at
+    /// the same place the number came from.
+    pub fn peak_normalised(&self) -> f64 {
+        1.0 + self.overshoot_pct / 100.0
+    }
+
+    /// `peak_overshoots` is every surviving window's peak, not just the
+    /// retained sample's — the spread describes the flight, not the buffer.
+    /// Both it and `mean` are searched over the rise only: past `tail` the
+    /// curve is the steady state it was normalised against, where a slow drift
+    /// would otherwise be reported as an overshoot half a second in.
+    fn measure(time_ms: &[f64], mean: &[f64], tail: usize, peak_overshoots: &mut [f64]) -> Self {
+        let rise = &mean[..rise_len(mean.len(), tail)];
+        let (peak_i, peak) = rise
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .expect("the rise is never empty");
+        let delay_i = mean
+            .iter()
+            .position(|&v| v >= 0.5)
+            .unwrap_or(mean.len() - 1);
+
+        peak_overshoots.sort_by(f64::total_cmp);
+        let quantile = |f: f64| {
+            let last = peak_overshoots.len().saturating_sub(1) as f64;
+            as_pct(peak_overshoots[(last * f).round() as usize])
+        };
+
+        Self {
+            overshoot_pct: as_pct(*peak),
+            peak_ms: time_ms[peak_i],
+            delay_ms: time_ms[delay_i],
+            spread_pct: quantile(0.25)..=quantile(0.75),
+        }
+    }
+}
+
+/// How much of a response is rise rather than the steady-state tail — at least
+/// one sample, however the window and response length were set.
+fn rise_len(len: usize, tail: usize) -> usize {
+    len.saturating_sub(tail).max(1)
+}
+
+/// A normalised peak as overshoot over the steady state, in percent.
+fn as_pct(peak: f64) -> f64 {
+    (peak - 1.0) * 100.0
+}
+
+/// One axis' worth of step responses: the mean over every surviving window, a
+/// bounded sample of the individual traces behind it, and the numbers read off
+/// that mean. The spread across traces is itself diagnostic, so the sample is
+/// kept as well as the average.
 #[derive(Debug, Clone)]
 pub struct AxisStepResponse {
     /// Shared across traces — they are all the same length on the same grid.
     pub time_ms: Arc<[f64]>,
-    pub traces: Vec<Vec<f64>>,
+    /// A bounded, evenly spread subset of the traces, for the drawn band.
+    /// Never the thing to count or average: see `count` and `mean`.
+    pub sample: Vec<Vec<f64>>,
+    /// How many windows actually survived — how much flight the mean is built
+    /// from, which is not `sample.len()`.
+    pub count: usize,
     pub mean: Vec<f64>,
+    pub metrics: StepMetrics,
+}
+
+/// A bounded, evenly spread sample of the trace stack.
+///
+/// Traces are admitted on a stride; when the buffer fills it is decimated in
+/// place by dropping every other entry and the stride doubles. Decimating as
+/// it fills is the point — collecting everything and thinning afterwards would
+/// leave the peak allocation, which is what costs ~57 MB per 1 kHz sublog and
+/// ~459 MB at 8 kHz, untouched. Deterministic, so the same log draws the same
+/// band every run.
+struct TraceSample {
+    cap: usize,
+    stride: usize,
+    seen: usize,
+    traces: Vec<Vec<f64>>,
+}
+
+impl TraceSample {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            stride: 1,
+            seen: 0,
+            traces: Vec::new(),
+        }
+    }
+
+    /// Takes the trace by value: one not admitted is dropped rather than
+    /// copied, which is the allocation this exists to avoid.
+    fn push(&mut self, trace: Vec<f64>) {
+        if self.cap > 0 && self.seen.is_multiple_of(self.stride) {
+            self.traces.push(trace);
+
+            if self.traces.len() >= self.cap {
+                let mut i = 0;
+                self.traces.retain(|_| {
+                    i += 1;
+                    i % 2 == 1
+                });
+                self.stride *= 2;
+            }
+        }
+        self.seen += 1;
+    }
 }
 
 /// Why an axis has no step response. Each cause reads differently to a pilot —
@@ -190,50 +323,62 @@ impl StepResponseAnalyzer {
         // otherwise be thousands of window-sized allocations.
         let (mut sp_w, mut gyro_w) = (vec![0.0; plan.window], vec![0.0; plan.window]);
 
-        let traces: Vec<Vec<f64>> = (0..=last_start)
-            .step_by(plan.hop)
-            .filter_map(|start| {
-                let sp = &setpoint[start..start + plan.window];
-                if sp.iter().fold(0.0, |m: f64, v| m.max(v.abs())) < self.min_setpoint_dps {
-                    return None;
+        // The mean is accumulated over every surviving window, never over the
+        // retained sample — capping what is kept must not change the answer.
+        let mut sum = vec![0.0; plan.len];
+        let mut peaks: Vec<f64> = Vec::new();
+        let mut sample = TraceSample::new(self.max_traces);
+
+        for start in (0..=last_start).step_by(plan.hop) {
+            let sp = &setpoint[start..start + plan.window];
+            if sp.iter().fold(0.0, |m: f64, v| m.max(v.abs())) < self.min_setpoint_dps {
+                continue;
+            }
+            sticks_moved = true;
+
+            // Tapered before the transform, both signals the same way, so
+            // the recovered response is of the craft and not of the cut.
+            let taper = |out: &mut [f64], signal: &[f64]| {
+                for ((o, v), w) in out.iter_mut().zip(signal).zip(&plan.hann) {
+                    *o = v * w;
                 }
-                sticks_moved = true;
+            };
+            taper(&mut sp_w, sp);
+            taper(&mut gyro_w, &gyro[start..start + plan.window]);
 
-                // Tapered before the transform, both signals the same way, so
-                // the recovered response is of the craft and not of the cut.
-                let taper = |out: &mut [f64], signal: &[f64]| {
-                    for ((o, v), w) in out.iter_mut().zip(signal).zip(&plan.hann) {
-                        *o = v * w;
-                    }
-                };
-                taper(&mut sp_w, sp);
-                taper(&mut gyro_w, &gyro[start..start + plan.window]);
+            // The step response is the cumulative sum of the impulse
+            // response, truncated to the region the panel draws.
+            let mut step: Vec<f64> = plan
+                .deconvolver
+                .impulse_response(&sp_w, &gyro_w)
+                .iter()
+                .scan(0.0, |acc, &h| {
+                    *acc += h;
+                    Some(*acc)
+                })
+                .take(plan.len)
+                .collect();
 
-                // The step response is the cumulative sum of the impulse
-                // response, truncated to the region the panel draws.
-                let mut step: Vec<f64> = plan
-                    .deconvolver
-                    .impulse_response(&sp_w, &gyro_w)
+            // Per-trace normalisation: without it a single drifting trace
+            // shifts the mean and overshoot stops meaning anything.
+            let steady = step[plan.len - plan.tail..].iter().sum::<f64>() / plan.tail as f64;
+            if !self.steady_state_band.contains(&steady) {
+                continue;
+            }
+            step.iter_mut().for_each(|v| *v /= steady);
+
+            sum.iter_mut().zip(&step).for_each(|(s, v)| *s += v);
+            peaks.push(
+                step[..rise_len(plan.len, plan.tail)]
                     .iter()
-                    .scan(0.0, |acc, &h| {
-                        *acc += h;
-                        Some(*acc)
-                    })
-                    .take(plan.len)
-                    .collect();
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max),
+            );
+            sample.push(step);
+        }
 
-                // Per-trace normalisation: without it a single drifting trace
-                // shifts the mean and overshoot stops meaning anything.
-                let steady = step[plan.len - plan.tail..].iter().sum::<f64>() / plan.tail as f64;
-                if !self.steady_state_band.contains(&steady) {
-                    return None;
-                }
-                step.iter_mut().for_each(|v| *v /= steady);
-                Some(step)
-            })
-            .collect();
-
-        if traces.is_empty() {
+        let count = peaks.len();
+        if count == 0 {
             return Err(match sticks_moved {
                 true => NoStepResponse::NoSteadyState {
                     band: self.steady_state_band.clone(),
@@ -244,13 +389,14 @@ impl StepResponseAnalyzer {
             });
         }
 
-        let mean = (0..plan.len)
-            .map(|i| traces.iter().map(|t| t[i]).sum::<f64>() / traces.len() as f64)
-            .collect();
+        let mean: Vec<f64> = sum.iter().map(|s| s / count as f64).collect();
+        let time_ms: Arc<[f64]> = (0..plan.len).map(|i| i as f64 * 1e3 / plan.fs).collect();
 
         Ok(AxisStepResponse {
-            time_ms: (0..plan.len).map(|i| i as f64 * 1e3 / plan.fs).collect(),
-            traces,
+            metrics: StepMetrics::measure(&time_ms, &mean, plan.tail, &mut peaks),
+            time_ms,
+            sample: sample.traces,
+            count,
             mean,
         })
     }
@@ -346,8 +492,147 @@ mod test {
             (peak - expected).abs() < 0.05,
             "expected overshoot to {expected:.3}, got {peak:.3}"
         );
-        assert!(roll.traces.len() > 10, "{} traces", roll.traces.len());
+        assert!(roll.count > 10, "{} responses", roll.count);
         assert_eq!(roll.mean.len(), roll.time_ms.len());
+    }
+
+    /// The same claim as above, now made against the number the panel prints
+    /// and the prompt will read rather than a hand-scan of the curve.
+    #[test]
+    fn the_reported_metrics_match_the_systems_analytic_response() {
+        let (freq_hz, damping) = (20.0, 0.4);
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, freq_hz, damping);
+
+        let roll = StepResponseAnalyzer::default()
+            .analyze(&log_with(setpoint, gyro))
+            .axis(Axis::Roll)
+            .cloned()
+            .expect("roll analysed");
+
+        // `exp(−πζ/√(1−ζ²))` over the steady state, and the peak of a
+        // second-order system lands at `π/(ωₙ√(1−ζ²))`.
+        let root = (1.0f64 - damping * damping).sqrt();
+        let expected_pct = 100.0 * (-std::f64::consts::PI * damping / root).exp();
+        let expected_peak_ms = 1e3 / (2.0 * freq_hz * root);
+
+        let m = &roll.metrics;
+        assert!(
+            (m.overshoot_pct - expected_pct).abs() < 5.0,
+            "expected {expected_pct:.0}% overshoot, got {:.0}%",
+            m.overshoot_pct
+        );
+        assert!(
+            (m.peak_ms - expected_peak_ms).abs() < 10.0,
+            "expected a peak at {expected_peak_ms:.0} ms, got {:.0} ms",
+            m.peak_ms
+        );
+        assert!(
+            m.delay_ms > 0.0 && m.delay_ms < m.peak_ms,
+            "half the commanded rate is reached on the way up, got {:.0} ms",
+            m.delay_ms
+        );
+        // One system driven throughout: the individual responses agree, and
+        // the analytic overshoot sits inside the middle half of them.
+        assert!(
+            m.spread_pct.contains(&expected_pct),
+            "expected {expected_pct:.0}% inside {:.0}–{:.0}%",
+            m.spread_pct.start(),
+            m.spread_pct.end()
+        );
+    }
+
+    /// A craft that never overshoots must not have the drift in its settled
+    /// tail reported as one, with the peak marker parked at the far edge of
+    /// the plot. The peak is a feature of the rise or it is not a peak.
+    #[test]
+    fn an_overdamped_craft_does_not_report_its_tail_as_an_overshoot() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, 5.0, 1.0);
+
+        let roll = StepResponseAnalyzer::default()
+            .analyze(&log_with(setpoint, gyro))
+            .axis(Axis::Roll)
+            .cloned()
+            .expect("roll analysed");
+
+        let d = StepResponseAnalyzer::default();
+        assert!(
+            roll.metrics.peak_ms <= d.response_ms - d.tail_ms,
+            "peak reported at {:.0} ms, inside the steady-state tail",
+            roll.metrics.peak_ms
+        );
+    }
+
+    /// The load-bearing one: the mean is accumulated over every surviving
+    /// window, so what the sample retains cannot move it. This is what would
+    /// rot silently if someone later averaged the sample instead.
+    #[test]
+    fn capping_what_is_retained_does_not_change_the_answer() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, 20.0, 0.4);
+        let log = log_with(setpoint, gyro);
+
+        let analysed = |max_traces| {
+            StepResponseAnalyzer {
+                max_traces,
+                ..Default::default()
+            }
+            .analyze(&log)
+            .axis(Axis::Roll)
+            .cloned()
+            .expect("roll analysed")
+        };
+
+        let (tight, huge) = (analysed(4), analysed(usize::MAX));
+
+        assert_eq!(tight.mean, huge.mean);
+        assert_eq!(tight.count, huge.count);
+        assert_eq!(tight.metrics, huge.metrics);
+    }
+
+    /// What the panel prints is how much flight the curve came from, not how
+    /// much of it was kept in memory.
+    #[test]
+    fn the_sample_stays_within_the_cap_while_the_count_stays_truthful() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, 20.0, 0.4);
+
+        let roll = StepResponseAnalyzer {
+            max_traces: 8,
+            ..Default::default()
+        }
+        .analyze(&log_with(setpoint, gyro))
+        .axis(Axis::Roll)
+        .cloned()
+        .expect("roll analysed");
+
+        assert!(roll.sample.len() <= 8, "{} retained", roll.sample.len());
+        assert!(
+            roll.count > roll.sample.len(),
+            "{} windows survived but {} were retained",
+            roll.count,
+            roll.sample.len()
+        );
+    }
+
+    /// A short flight still gets its numbers — the panel's caveat has to have
+    /// something to caveat, and "not much data" must read differently from
+    /// "nothing was computed".
+    #[test]
+    fn a_thin_stack_still_reports_metrics() {
+        let setpoint = stick_input(2_600, 200.0);
+        let gyro = second_order(&setpoint, 20.0, 0.4);
+
+        let roll = StepResponseAnalyzer::default()
+            .analyze(&log_with(setpoint, gyro))
+            .axis(Axis::Roll)
+            .cloned()
+            .expect("roll analysed");
+
+        assert!(roll.count < 10, "{} responses", roll.count);
+        assert!(roll.metrics.overshoot_pct.is_finite());
+        assert!(roll.metrics.peak_ms > 0.0);
     }
 
     /// A hover with the sticks parked is not a step response, and the reason

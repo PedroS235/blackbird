@@ -3,7 +3,7 @@ pub mod step_response;
 
 pub use spectral::{GyroNoiseAnalyzer, SpectralAnalysis};
 pub use step_response::{
-    AxisStepResponse, NoStepResponse, StepResponseAnalysis, StepResponseAnalyzer,
+    AxisStepResponse, NoStepResponse, StepMetrics, StepResponseAnalysis, StepResponseAnalyzer,
 };
 
 /// Everything computed from one sublog at load time. Bundled so a new

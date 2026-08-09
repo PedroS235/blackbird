@@ -1,6 +1,6 @@
 # Step response: numbers, not just a curve
 
-Status: ready-for-agent
+Status: done
 
 Follow-up to `.scratch/step-response-parity/` (done), which made the curve
 trustworthy. This spec makes it *readable* — and affordable to keep around.

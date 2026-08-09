@@ -147,13 +147,22 @@ pub struct SpectralResult {
     pub throttle_map: ndarray::Array2<f32>,     // throttle_bin × freq → dB
 }
 
-// Implemented as `analysis::step_response::AxisStepResponse`. Overshoot,
-// rise and settling metrics are deferred until the curve has been checked
-// against real logs.
+// Implemented as `analysis::step_response::AxisStepResponse`. No settling
+// time: a 500 ms window averaged from as few as forty traces cannot support
+// a stable one.
 pub struct AxisStepResponse {
     pub time_ms: Arc<[f64]>,                    // shared across traces
-    pub traces: Vec<Vec<f64>>,                  // one per surviving window
+    pub sample: Vec<Vec<f64>>,                  // bounded, evenly spread subset
+    pub count: usize,                           // surviving windows, ≥ sample.len()
     pub mean: Vec<f64>,                         // pointwise average of them all
+    pub metrics: StepMetrics,                   // measured on `mean`
+}
+
+pub struct StepMetrics {
+    pub overshoot_pct: f64,                     // peak over the steady state
+    pub peak_ms: f64,
+    pub delay_ms: f64,                          // to the 50% crossing
+    pub spread_pct: RangeInclusive<f64>,        // IQR of the per-trace peak
 }
 
 pub struct FilterDelayResult {
@@ -197,13 +206,17 @@ where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer
   negative one, which would otherwise be flipped upright into the mean
 - Reject windows where `max |setpoint| < 52 deg/s`; no throttle gating
 - Defaults match PID-Analyzer (`framelen = 1.0`, `superpos = 16`,
-  `np.hanning`). The panel exposes window, hop, minimum stick input, λ, the two
-  ends of the band and response length as knobs (`tail_ms` stays a field);
-  load-time analysis always uses the defaults
-- Input: `setpoint` (logged field only — reconstructing it from `rcCommand`
-  needs rates the metadata does not carry) and `gyroADC` (filtered), which is
-  what the PID loop saw, so filter delay belongs in the measured response
-- Traces are kept individually as well as averaged — the spread is diagnostic
+  `np.hanning`). The panel exposes window, hop, minimum stick input, λ and the
+  two ends of the band as knobs; `tail_ms`, `response_ms` and `max_traces`
+  stay fields, because they change normalisation or memory rather than the
+  view; load-time analysis always uses the defaults
+- Input: `setpoint` (logged field only) and `gyroADC` (filtered), which is what
+  the PID loop saw, so filter delay belongs in the measured response
+- Traces are kept individually as well as averaged — the spread is diagnostic.
+  Only a bounded, evenly spread sample of them is retained (`max_traces`, 200);
+  the mean and the metrics always come from every surviving window
+- Metrics (`StepMetrics`) are measured on the mean curve, so the number and the
+  drawn curve can never disagree. Below ten responses the panel says so
 
 ### Filter delay
 

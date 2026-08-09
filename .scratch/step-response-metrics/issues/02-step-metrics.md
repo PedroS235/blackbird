@@ -1,6 +1,6 @@
 # 02 — Report the step response as numbers
 
-Status: todo
+Status: done
 Blocked by: 01
 
 Spec: `.scratch/step-response-metrics/spec.md`

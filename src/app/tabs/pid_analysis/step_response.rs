@@ -2,10 +2,10 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use egui::{Color32, DragValue, RichText, Ui};
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
 use crate::analysis::{
-    AxisStepResponse, NoStepResponse, StepResponseAnalysis, StepResponseAnalyzer,
+    AxisStepResponse, NoStepResponse, StepMetrics, StepResponseAnalysis, StepResponseAnalyzer,
 };
 use crate::app::tabs::{GYRO_AXIS_COLORS, TabCtx, stacked_plot_height};
 use crate::parser::Axis;
@@ -14,11 +14,13 @@ use crate::parser::Axis;
 /// with the mean on top of it.
 const TRACE_ALPHA: u8 = 40;
 const MEAN_WIDTH: f32 = 2.0;
+const PEAK_MARKER_RADIUS: f32 = 4.0;
 
-/// A dense log stacks hundreds of traces; past a hundred they are pixel-for-
-/// pixel the same band and only cost frame time. The mean always comes from
-/// all of them.
-const MAX_DRAWN_TRACES: usize = 100;
+/// Below this many responses the numbers are still shown — "not much data" has
+/// to be tellable from "nothing was computed" — but they carry the count. A
+/// statement about statistics rather than about flying, so not a knob. On the
+/// fixture's freestyle logs even the hardest preset averages 40.
+const THIN_STACK: usize = 10;
 
 /// The stick mask is not a quality gate — the median second of even a hard
 /// freestyle log peaks around 20 deg/s — it is a choice of which inputs the
@@ -99,6 +101,18 @@ impl StepResponse {
                 {
                     self.analyzer.min_setpoint_dps = dps;
                 }
+            }
+
+            // What the presets mean depends on the craft: 120 deg/s is a flick
+            // on 1200 deg/s rates and a full flip on 400.
+            if let Some(rates) = &ctx.metadata.rates {
+                ui.separator();
+                ui.label(RichText::new(rates.to_string()).weak())
+                    .on_hover_text(
+                        "The rate curve this flight was flown on, as the log records it: type, \
+                         then the roll/pitch/yaw rate values. Not deg/s — turning these into a \
+                         maximum rate needs a different formula per rate type.",
+                    );
             }
         });
 
@@ -181,7 +195,11 @@ impl StepResponse {
         // and put back together below.
         let (mut low, mut high) = (*a.steady_state_band.start(), *a.steady_state_band.end());
 
-        let knobs: [(&str, &mut f64, RangeInclusive<f64>, f64, &str, String); 7] = [
+        // No response-length knob: `response_ms` sets where the steady-state
+        // tail sits, so a control labelled "response length" re-normalised
+        // every trace while implying it only changed the view. Looking closer
+        // at the rise is plot zoom, which `egui_plot` already provides.
+        let knobs: [(&str, &mut f64, RangeInclusive<f64>, f64, &str, String); 6] = [
             (
                 "window",
                 &mut a.window_s,
@@ -190,7 +208,10 @@ impl StepResponse {
                 " s",
                 format!(
                     "How much flight each response is measured over. Longer holds lower \
-                          frequencies, shorter keeps the tune constant across it. Default {} s.",
+                          frequencies, shorter keeps the tune constant across it. Below {} s it \
+                          also truncates the response, which moves the steady state every trace \
+                          is normalised by. Default {} s.",
+                    d.response_ms / 1e3,
                     d.window_s
                 ),
             ),
@@ -255,21 +276,6 @@ impl StepResponse {
                     d.steady_state_band.end()
                 ),
             ),
-            (
-                "response length",
-                &mut a.response_ms,
-                50.0..=2000.0,
-                5.0,
-                " ms",
-                format!(
-                    "How much of the response is measured — long enough for the settle, short \
-                          enough to read the rise. Its last {} ms is the steady state every \
-                          trace is normalised by, so moving this re-normalises the curve and \
-                          changes which traces are kept. Never longer than the window. \
-                          Default {} ms.",
-                    d.tail_ms, d.response_ms
-                ),
-            ),
         ];
 
         let dragging = egui::Grid::new("step_response_knobs")
@@ -316,7 +322,17 @@ fn show_axis(
 
     ui.horizontal(|ui| {
         ui.label(RichText::new(axis.name()).strong());
-        ui.label(format!("mean of {} responses", response.traces.len()));
+        ui.label(format!("mean of {} responses", response.count));
+        ui.separator();
+        ui.label(metrics_line(&response.metrics, response.count))
+            .on_hover_text(
+                "Overshoot is how far past the commanded rate the averaged curve went, peak is \
+                 when it got there and delay how long it took to reach half the commanded rate. \
+                 The range is the middle half of the individual responses: their peaks land at \
+                 slightly different times, so averaging flattens them and the curve's own \
+                 overshoot normally sits below that range. A wide range means the responses \
+                 behind the curve disagree.",
+            );
     });
 
     let points = |values: &[f64]| -> PlotPoints {
@@ -333,12 +349,14 @@ fn show_axis(
         .x_axis_label("ms")
         .y_axis_label("normalised")
         .show(ui, |plot_ui| {
+            // Every retained trace: the analyser's `max_traces` is the one
+            // owner of how dense this band is, so a second cap here cannot
+            // thin it out as the stack behind it grows.
             if show_individual {
-                let stride = response.traces.len().div_ceil(MAX_DRAWN_TRACES).max(1);
                 let faded =
                     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), TRACE_ALPHA);
 
-                for (i, trace) in response.traces.iter().enumerate().step_by(stride) {
+                for (i, trace) in response.sample.iter().enumerate() {
                     plot_ui.line(Line::new(format!("response {i}"), points(trace)).color(faded));
                 }
             }
@@ -349,7 +367,37 @@ fn show_axis(
                     .color(color)
                     .width(MEAN_WIDTH),
             );
+
+            // So the overshoot number and the picture are visibly the same
+            // claim. Rise and delay stay numeric — three annotations across
+            // three stacked plots is noise.
+            let m = &response.metrics;
+            plot_ui.points(
+                Points::new("peak", vec![[m.peak_ms, m.peak_normalised()]])
+                    .color(color)
+                    .shape(MarkerShape::Diamond)
+                    .radius(PEAK_MARKER_RADIUS),
+            );
         });
+}
+
+/// The line a pilot would say out loud. Whole percentages and whole
+/// milliseconds throughout — the measurement supports no more precision than
+/// that.
+fn metrics_line(m: &StepMetrics, count: usize) -> String {
+    let line = format!(
+        "{:.0}% overshoot (individual responses {:.0}–{:.0}%), peak {:.0} ms, delay {:.0} ms",
+        m.overshoot_pct,
+        m.spread_pct.start(),
+        m.spread_pct.end(),
+        m.peak_ms,
+        m.delay_ms
+    );
+
+    match count < THIN_STACK {
+        true => format!("{line} — from only {count} responses"),
+        false => line,
+    }
 }
 
 /// An empty axis is never silently blank — the analyser says which of its

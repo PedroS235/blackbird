@@ -102,6 +102,78 @@ pub struct FilterConfig {
     pub rpm_filter: Option<RpmFilterConfig>,
 }
 
+/// Betaflight's rate curve families, decoded from the `rates_type` header the
+/// same way filter types are decoded from theirs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RateType {
+    #[default]
+    Betaflight,
+    Raceflight,
+    Kiss,
+    Actual,
+    Quick,
+    /// A build we do not know the curve for. Rendered as the raw code rather
+    /// than guessed at — a wrong conversion reads as fact.
+    Unknown(u32),
+    /// The header is there but is not a code at all. Named rather than
+    /// defaulted, for the same reason as `Unknown`.
+    Unreadable,
+}
+
+impl RateType {
+    /// Decode Betaflight's `rates_type` header code (`rateTypeNames` order).
+    pub fn from_bf_code(code: u32) -> Self {
+        match code {
+            0 => Self::Betaflight,
+            1 => Self::Raceflight,
+            2 => Self::Kiss,
+            3 => Self::Actual,
+            4 => Self::Quick,
+            code => Self::Unknown(code),
+        }
+    }
+}
+
+impl std::fmt::Display for RateType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Betaflight => f.write_str("Betaflight"),
+            Self::Raceflight => f.write_str("Raceflight"),
+            Self::Kiss => f.write_str("KISS"),
+            Self::Actual => f.write_str("Actual"),
+            Self::Quick => f.write_str("Quick"),
+            Self::Unknown(code) => write!(f, "rates type {code}"),
+            Self::Unreadable => f.write_str("unrecognised rates"),
+        }
+    }
+}
+
+/// The craft's rate curve as the log records it: the raw header values and the
+/// curve family, per axis in roll/pitch/yaw order. No centre-sensitivity or
+/// maximum-rate maths — each rate type needs its own formula and none are
+/// verified yet, so this is the typed place that work lands.
+///
+/// `rc_rates` and `expo` are `None` when the log did not record them, so that
+/// the maths landing here later cannot derive a rate from a fabricated zero.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RateConfig {
+    pub rate_type: RateType,
+    pub rc_rates: Option<[f32; 3]>,
+    pub rates: [f32; 3],
+    pub expo: Option<[f32; 3]>,
+}
+
+impl std::fmt::Display for RateConfig {
+    /// `Actual 67/67/67` — the type and the raw per-axis rate values, as the
+    /// log records them. Not deg/s: under Actual and Quick rates the
+    /// configurator shows roughly ten times these numbers, and under
+    /// Betaflight rates something else again.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [roll, pitch, yaw] = self.rates;
+        write!(f, "{} {roll:.0}/{pitch:.0}/{yaw:.0}", self.rate_type)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub file_name: String,
@@ -113,6 +185,9 @@ pub struct Metadata {
     /// Total flight duration, derived from first/last frame timestamp.
     pub duration: Duration,
     pub filters: FilterConfig,
+    /// `None` when the log carries no rate headers at all — better than
+    /// showing a pilot zeroes as if they were their rates.
+    pub rates: Option<RateConfig>,
     /// Betaflight debug mode name (e.g. "FFT_FREQ"), or "NONE" if unset.
     pub debug_mode: String,
     /// Passthrough for all non-standard headers (PIDs, filter settings, rates, etc.)

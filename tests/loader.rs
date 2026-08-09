@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use blackbird::analysis::NoStepResponse;
 use blackbird::loader::{CancelToken, LoadEvent, LoadedLog, LogLoader};
+use blackbird::parser::metadata::RateType;
 use blackbird::parser::{Axis, LogFile};
 
 fn fixture(name: &str) -> PathBuf {
@@ -172,6 +173,20 @@ fn multi_log_file_reports_each_sublog() {
     assert_eq!(sublogs, (0..8).collect::<Vec<_>>());
 }
 
+/// The rate headers a pilot flew on reach the log card and the preset row as
+/// decoded values, not as raw header strings.
+#[test]
+fn a_fixtures_headers_decode_to_the_rates_it_was_flown_on() {
+    let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let rates = loaded.logs[0].metadata.rates.expect("rate config");
+
+    assert_eq!(rates.rate_type, RateType::Actual);
+    assert_eq!(rates.rc_rates, Some([12.0, 12.0, 12.0]));
+    assert_eq!(rates.rates, [70.0, 70.0, 60.0]);
+    assert_eq!(rates.expo, Some([45.0, 45.0, 35.0]));
+    assert_eq!(rates.to_string(), "Actual 70/70/60");
+}
+
 /// The hover fixture logs `setpoint`, but the pilot is holding position — no
 /// window clears the 52 deg/s stick mask, so every axis is legitimately empty.
 #[test]
@@ -200,10 +215,10 @@ fn dropping_the_stick_mask_recovers_traces_from_the_hover() {
         .axis(Axis::Roll)
         .expect("roll traces");
 
-    assert!(!roll.traces.is_empty());
+    assert!(roll.count > 0);
     assert_eq!(roll.mean.len(), roll.time_ms.len());
     assert!(roll.mean.iter().all(|v| v.is_finite()));
-    assert!(roll.traces.iter().all(|t| t.len() == roll.mean.len()));
+    assert!(roll.sample.iter().all(|t| t.len() == roll.mean.len()));
 }
 
 /// The bug this whole pass exists to kill, guarded on real flight rather than
@@ -224,5 +239,65 @@ fn responses_from_a_real_flight_start_from_rest() {
     assert!(
         starts.iter().all(|v| v.abs() < 0.1),
         "curves start at {starts:?}"
+    );
+}
+
+/// The regression guard on real flight rather than a synthetic: a quad that
+/// answers its sticks overshoots by some tens of percent and peaks tens of
+/// milliseconds in. Numbers outside that are reading an artefact, not a tune.
+#[test]
+fn a_real_flight_reports_plausible_step_metrics() {
+    let loaded = ready(load(&LogLoader::default(), "eight_logs_in_one.bbl"));
+
+    let metrics: Vec<_> = loaded
+        .analysis
+        .iter()
+        .flat_map(|a| Axis::ALL.iter().filter_map(|&axis| a.step.axis(axis).ok()))
+        .map(|response| response.metrics.clone())
+        .collect();
+
+    assert!(!metrics.is_empty(), "no axis of the fixture was analysed");
+    for m in &metrics {
+        assert!(
+            (0.0..=100.0).contains(&m.overshoot_pct),
+            "implausible overshoot {:.0}%",
+            m.overshoot_pct
+        );
+        assert!(
+            (10.0..=200.0).contains(&m.peak_ms),
+            "implausible peak at {:.0} ms",
+            m.peak_ms
+        );
+        assert!(
+            m.delay_ms > 0.0 && m.delay_ms < m.peak_ms,
+            "delay {:.0} ms against a peak at {:.0} ms",
+            m.delay_ms,
+            m.peak_ms
+        );
+        assert!(m.spread_pct.start() <= m.spread_pct.end());
+    }
+}
+
+/// Bounding what is retained is a memory change, not an answer change — on a
+/// real multi-flight log every axis keeps a sample within the cap while still
+/// reporting how many windows the mean actually came from.
+#[test]
+fn a_real_flight_retains_a_bounded_sample_of_a_larger_stack() {
+    let loader = LogLoader::default();
+    let cap = loader.step_response.max_traces;
+    let loaded = ready(load(&loader, "eight_logs_in_one.bbl"));
+
+    let responses: Vec<_> = loaded
+        .analysis
+        .iter()
+        .flat_map(|a| Axis::ALL.iter().filter_map(|&axis| a.step.axis(axis).ok()))
+        .map(|r| (r.sample.len(), r.count))
+        .collect();
+
+    assert!(!responses.is_empty(), "no axis of the fixture was analysed");
+    assert!(responses.iter().all(|&(sample, _)| sample <= cap));
+    assert!(
+        responses.iter().any(|&(sample, count)| count > sample),
+        "no axis stacked more windows than the cap: {responses:?}"
     );
 }

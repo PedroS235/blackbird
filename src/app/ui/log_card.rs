@@ -31,13 +31,15 @@ pub fn show(
             // Title row: chart icon, file name left, radio right
             ui.horizontal(|ui| {
                 ui.label(RichText::new(egui_phosphor::regular::DATABASE));
-                // Cut the file name if it's too big
-                if metadata.file_name.len() > MAX_FILENAME_LEN {
-                    ui.label(RichText::new(format!("{}...", &metadata.file_name[..30])).strong())
-                        .on_hover_text(&metadata.file_name);
-                } else {
-                    ui.label(RichText::new(&metadata.file_name).strong());
-                }
+                // Cut the file name if it's too big — by characters, since a
+                // byte index into an accented or CJK name can land mid-glyph
+                // and panic on a repaint the pilot cannot get back from.
+                match metadata.file_name.char_indices().nth(MAX_FILENAME_LEN) {
+                    Some((cut, _)) => ui
+                        .label(RichText::new(format!("{}...", &metadata.file_name[..cut])).strong())
+                        .on_hover_text(&metadata.file_name),
+                    None => ui.label(RichText::new(&metadata.file_name).strong()),
+                };
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.radio(is_selected, "").clicked() {
                         clicked = true;
@@ -49,6 +51,10 @@ pub fn show(
             ui.label(RichText::new(&metadata.craft_name));
             ui.label(RichText::new(format!("{} | {}", metadata.firmware, metadata.board)).small());
             ui.label(RichText::new(format!("{:.0} Hz  •  {:.1} s", hz, duration_s)).small());
+            if let Some(rates) = &metadata.rates {
+                ui.label(RichText::new(rates.to_string()).small())
+                    .on_hover_text("The craft's rate curve: type, then roll/pitch/yaw rates.");
+            }
 
             // Sub-log selector — only shown when file has multiple logs
             if sublog_count > 1 {

@@ -151,6 +151,7 @@ fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metad
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|&t| t > 0);
     let filters = parse_filter_config(&raw_headers);
+    let rates = parse_rate_config(&raw_headers);
     let debug_mode = headers.debug_mode().to_string();
 
     Metadata {
@@ -161,9 +162,39 @@ fn build_metadata(headers: &blackbox_log::Headers<'_>, file_name: &str) -> Metad
         looptime_us,
         duration: Duration::ZERO,
         filters,
+        rates,
         debug_mode,
         raw_headers,
     }
+}
+
+/// `None` when the log records no rate curve — an older or partial header set,
+/// where zeroes would read as the pilot's actual rates.
+fn parse_rate_config(
+    h: &std::collections::HashMap<String, String>,
+) -> Option<metadata::RateConfig> {
+    let triple = |key: &str| -> Option<[f32; 3]> {
+        let mut parts = h.get(key)?.split(',').map(|s| s.trim().parse().ok());
+        Some([parts.next()??, parts.next()??, parts.next()??])
+    };
+
+    // A log without `rates_type` predates the setting, where Betaflight rates
+    // were the only curve. One we cannot read is not that — it says so rather
+    // than being shown as Betaflight rates the craft may never have flown.
+    let rate_type = match h.get("rates_type") {
+        None => metadata::RateType::default(),
+        Some(raw) => raw.trim().parse().map_or(
+            metadata::RateType::Unreadable,
+            metadata::RateType::from_bf_code,
+        ),
+    };
+
+    Some(metadata::RateConfig {
+        rate_type,
+        rc_rates: triple("rc_rates"),
+        rates: triple("rates")?,
+        expo: triple("rc_expo"),
+    })
 }
 
 fn parse_filter_config(h: &std::collections::HashMap<String, String>) -> metadata::FilterConfig {
@@ -590,6 +621,52 @@ mod test {
         assert_eq!(cfg.harmonics, 3);
         assert_eq!(cfg.min_hz, 100.0);
         assert_eq!(cfg.q, 5.0);
+    }
+
+    /// A rate type this build does not know renders as its code rather than
+    /// being guessed at as one of the curves we do know.
+    #[test]
+    fn an_unrecognised_rate_type_keeps_its_code() {
+        let h = HashMap::from([
+            ("rates_type".into(), "9".into()),
+            ("rates".into(), "67,67,67".into()),
+        ]);
+        let cfg = parse_rate_config(&h).unwrap();
+
+        assert_eq!(cfg.rate_type, metadata::RateType::Unknown(9));
+        assert_eq!(cfg.to_string(), "rates type 9 67/67/67");
+    }
+
+    /// A rate type that is not a code at all is not silently read as the
+    /// default curve — the pilot is told it could not be read.
+    #[test]
+    fn an_unreadable_rate_type_is_not_shown_as_betaflight_rates() {
+        let h = HashMap::from([
+            ("rates_type".into(), "ACTUAL".into()),
+            ("rates".into(), "67,67,67".into()),
+        ]);
+
+        assert_eq!(
+            parse_rate_config(&h).unwrap().rate_type,
+            metadata::RateType::Unreadable
+        );
+    }
+
+    /// Rate values the log never recorded stay absent rather than becoming
+    /// zeroes indistinguishable from a craft configured at zero.
+    #[test]
+    fn rate_values_the_log_omits_are_absent_rather_than_zero() {
+        let h = HashMap::from([("rates".into(), "67,67,67".into())]);
+        let cfg = parse_rate_config(&h).unwrap();
+
+        assert_eq!(cfg.rc_rates, None);
+        assert_eq!(cfg.expo, None);
+        assert_eq!(cfg.rates, [67.0, 67.0, 67.0]);
+    }
+
+    #[test]
+    fn rate_config_none_without_rate_headers() {
+        assert!(parse_rate_config(&HashMap::new()).is_none());
     }
 
     #[test]

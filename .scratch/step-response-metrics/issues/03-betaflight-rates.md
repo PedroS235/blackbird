@@ -1,6 +1,6 @@
 # 03 — Parse and show the craft's rates
 
-Status: todo
+Status: done
 
 Spec: `.scratch/step-response-metrics/spec.md`
 

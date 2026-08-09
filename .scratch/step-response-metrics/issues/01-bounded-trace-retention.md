@@ -1,6 +1,6 @@
 # 01 — Bound what the trace stack retains
 
-Status: todo
+Status: done
 
 Spec: `.scratch/step-response-metrics/spec.md`
 
