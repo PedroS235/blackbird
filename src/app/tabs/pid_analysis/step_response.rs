@@ -20,6 +20,36 @@ const MEAN_WIDTH: f32 = 2.0;
 /// all of them.
 const MAX_DRAWN_TRACES: usize = 100;
 
+/// The stick mask is not a quality gate — the median second of even a hard
+/// freestyle log peaks around 20 deg/s — it is a choice of which inputs the
+/// curve describes, and a discipline is how a pilot says that. It changes the
+/// answer: on the fixture's freestyle logs overshoot falls from 1.20 at
+/// 25 deg/s to 1.12 at 120, because big inputs meet rate limits and prop
+/// saturation that small ones never reach.
+///
+/// Racing sits at Betaflight's default centre stick sensitivity; the other two
+/// bracket it. All three keep enough traces on a real flight to average (40 at
+/// the hardest), and the gentlest still analyses a cinematic log that 52
+/// rejects outright.
+const STICK_PRESETS: [(&str, f64, &str); 3] = [
+    (
+        "Cinematic",
+        25.0,
+        "Gentle pans and drifts. About the floor where a soft flight still answers — \
+         below this the deconvolution is reading hover jitter.",
+    ),
+    (
+        "Racing",
+        70.0,
+        "Committed inputs: hard direction changes rather than trim corrections.",
+    ),
+    (
+        "Freestyle",
+        120.0,
+        "Flips and rolls only — the inputs that take the craft to its rate limits.",
+    ),
+];
+
 /// The knobs' last result, kept so that dragging one slider does not re-run
 /// the stack on every frame. Identified by the log's time axis rather than an
 /// index, so a store that reallocates cannot alias two flights.
@@ -53,7 +83,25 @@ impl Default for StepResponse {
 
 impl StepResponse {
     pub(super) fn show(&mut self, ui: &mut Ui, ctx: &TabCtx<'_>) {
-        ui.checkbox(&mut self.show_individual, "show individual responses");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.show_individual, "show individual responses");
+            ui.separator();
+
+            // Top level rather than inside the knobs: picking a discipline is
+            // a pilot-level question, where the deg/s behind it is not.
+            ui.label("stick input:");
+            for (name, dps, hint) in STICK_PRESETS {
+                let chosen = self.analyzer.min_setpoint_dps == dps;
+                if ui
+                    .selectable_label(chosen, name)
+                    .on_hover_text(format!("{hint}\n\nMinimum stick input {dps:.0} deg/s."))
+                    .clicked()
+                {
+                    self.analyzer.min_setpoint_dps = dps;
+                }
+            }
+        });
+
         let dragging = self.show_knobs(ui);
         ui.add_space(4.0);
 
@@ -165,8 +213,8 @@ impl StepResponse {
                 1.0,
                 " deg/s",
                 format!(
-                    "How hard the sticks must move for a window to count. Lower it for a \
-                          cinematic flight, raise it to keep only the hardest inputs. \
+                    "How hard the sticks must move for a second of flight to count. The \
+                          presets above set it per discipline; this is the same knob. \
                           Default {} deg/s.",
                     d.min_setpoint_dps
                 ),
