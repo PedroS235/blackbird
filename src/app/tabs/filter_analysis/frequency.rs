@@ -2,7 +2,7 @@ use egui::{RichText, Ui};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 use elegance::Slider;
 
-use super::PEAK_MARKER_COLOR;
+use super::{PEAK_MARKER_COLOR, drawn_axes};
 use crate::analysis::SpectralAnalysis;
 use crate::app::tabs::{GYRO_AXIS_COLORS, GYRO_RAW_COLOR, stacked_plot_height};
 use crate::parser::{Axis, PerAxis};
@@ -25,14 +25,16 @@ impl Default for Frequency {
 
 impl Frequency {
     pub(super) fn show(&mut self, ui: &mut Ui, analysis: &SpectralAnalysis) {
-        let plot_height = stacked_plot_height(ui, 3);
-
         ui.add(
             Slider::new(&mut self.peak_min_hz, 0.0..=500.0)
                 .label("max search min Hz")
                 .suffix("Hz"),
         );
         ui.add_space(4.0);
+
+        // After the slider, and over the axes that draw: measuring before the
+        // slider sized the plots against height the slider then took.
+        let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
 
         for axis in Axis::ALL {
             let Some(spec) = analysis.axis(axis) else {

@@ -1,0 +1,106 @@
+use egui::{RichText, Ui};
+use elegance::Slider;
+
+use crate::app::tabs::stacked_plot_height;
+use crate::app::ui::heatmap::{Heatmap, HeatmapOrientation, OverlaySeries};
+use crate::parser::Axis;
+use crate::signal::fft::BinnedSpectrum;
+
+/// One axis' worth of heatmap. Gathered before the panel draws, so the row
+/// count is what actually renders and not a hopeful three.
+pub(super) struct HeatmapRow<'a> {
+    pub(super) axis: Axis,
+    pub(super) spectrum: &'a BinnedSpectrum,
+    pub(super) overlay: Option<OverlaySeries<'a>>,
+}
+
+/// Which heatmap this is. The two differ only in orientation, wording and plot
+/// id — everything else, the sensitivity floor above all, is shared, so that
+/// changing the slider's range is one edit rather than two files that never
+/// reference each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeatmapKind {
+    VsThrottle,
+    Spectrogram,
+}
+
+impl HeatmapKind {
+    fn orientation(self) -> HeatmapOrientation {
+        match self {
+            Self::VsThrottle => HeatmapOrientation::VsThrottle,
+            Self::Spectrogram => HeatmapOrientation::VsTime,
+        }
+    }
+
+    /// Plot ids are egui's persistence keys — a pilot's zoom lives on them, so
+    /// they stay exactly what each panel used before they were merged.
+    fn plot_id(self, axis: Axis) -> String {
+        match self {
+            Self::VsThrottle => format!("throttle_heatmap_{}", axis.name()),
+            Self::Spectrogram => format!("spectrogram_{}", axis.name()),
+        }
+    }
+
+    fn heading(self, axis: Axis) -> String {
+        match self {
+            Self::VsThrottle => format!("{} vs throttle", axis.name()),
+            Self::Spectrogram => format!("{} spectrogram", axis.name()),
+        }
+    }
+}
+
+pub(super) struct HeatmapPanel {
+    floor_db: f32,
+}
+
+impl Default for HeatmapPanel {
+    fn default() -> Self {
+        Self { floor_db: -60.0 }
+    }
+}
+
+impl HeatmapPanel {
+    pub(super) fn show(&mut self, ui: &mut Ui, kind: HeatmapKind, rows: Vec<HeatmapRow<'_>>) {
+        ui.add(
+            Slider::new(&mut self.floor_db, -120.0..=-5.0)
+                .label("sensitivity (noise floor dB)")
+                .suffix("dB"),
+        );
+        ui.add_space(4.0);
+
+        // Measured after the slider, which has already taken its height.
+        let height = stacked_plot_height(ui, rows.len());
+
+        for row in rows {
+            ui.label(RichText::new(kind.heading(row.axis)).strong());
+            Heatmap {
+                id: kind.plot_id(row.axis),
+                orientation: kind.orientation(),
+                spectrum: row.spectrum,
+                height,
+                floor_db: self.floor_db as f64,
+                overlay: row.overlay,
+            }
+            .show(ui);
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Renaming a plot id silently throws away the persisted zoom of every
+    /// pilot who had one.
+    #[test]
+    fn plot_ids_are_stable() {
+        assert_eq!(
+            HeatmapKind::VsThrottle.plot_id(Axis::Roll),
+            "throttle_heatmap_roll"
+        );
+        assert_eq!(
+            HeatmapKind::Spectrogram.plot_id(Axis::Yaw),
+            "spectrogram_yaw"
+        );
+    }
+}

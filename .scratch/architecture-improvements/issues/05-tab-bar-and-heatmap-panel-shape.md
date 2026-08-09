@@ -1,4 +1,4 @@
-Status: todo
+Status: done
 Type: task
 
 # Converge the tab bars and the two heatmap panels

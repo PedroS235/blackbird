@@ -3,7 +3,7 @@ mod step_response;
 
 use egui::Ui;
 
-use super::TabCtx;
+use super::{TabCtx, tab_bar};
 use step_response::StepResponse;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,16 +21,14 @@ pub(super) struct PidAnalysis {
 
 impl PidAnalysis {
     pub(super) fn show(&mut self, ui: &mut Ui, ctx: &TabCtx<'_>) {
-        ui.horizontal(|ui| {
-            for (tab, label) in [
-                (PidAnalysisTab::GyroVsSetpoint, "Gyro Vs Setpoint"),
-                (PidAnalysisTab::StepResponse, "Step Response"),
-            ] {
-                if ui.selectable_label(self.selected == tab, label).clicked() {
-                    self.selected = tab;
-                }
-            }
-        });
+        tab_bar(
+            ui,
+            &mut self.selected,
+            &[
+                (PidAnalysisTab::GyroVsSetpoint, "Gyro Vs Setpoint", true),
+                (PidAnalysisTab::StepResponse, "Step Response", true),
+            ],
+        );
         ui.add_space(4.0);
 
         match self.selected {

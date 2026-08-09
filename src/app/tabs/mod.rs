@@ -47,7 +47,15 @@ impl Tabs {
     /// `Option`, and no tab re-implements the empty case.
     pub(super) fn show(&mut self, ui: &mut Ui, flight: Option<(&ParsedLog, &Analysis)>) {
         egui::CentralPanel::default().show(ui, |ui| {
-            self.show_tab_bar(ui);
+            tab_bar(
+                ui,
+                &mut self.selected,
+                &[
+                    (MainTab::Timeseries, "Timeseries", true),
+                    (MainTab::FilterAnalysis, "Filter Analysis", true),
+                    (MainTab::PidAnalysis, "PID Analysis", true),
+                ],
+            );
             ui.separator();
 
             let Some((parsed, analysis)) = flight else {
@@ -67,20 +75,21 @@ impl Tabs {
             }
         });
     }
+}
 
-    fn show_tab_bar(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            for (tab, label) in [
-                (MainTab::Timeseries, "Timeseries"),
-                (MainTab::FilterAnalysis, "Filter Analysis"),
-                (MainTab::PidAnalysis, "PID Analysis"),
-            ] {
-                if ui.selectable_label(self.selected == tab, label).clicked() {
-                    self.selected = tab;
-                }
+/// Every tab bar in the app, at every level. `add_enabled` throughout rather
+/// than `selectable_label`: a tab the log cannot fill has to grey out rather
+/// than vanish, and which idiom a new tab bar gets should not depend on which
+/// file it was copied from.
+fn tab_bar<T: Copy + PartialEq>(ui: &mut Ui, selected: &mut T, tabs: &[(T, &str, bool)]) {
+    ui.horizontal(|ui| {
+        for &(tab, label, enabled) in tabs {
+            let button = egui::Button::selectable(*selected == tab, label);
+            if ui.add_enabled(enabled, button).clicked() {
+                *selected = tab;
             }
-        });
-    }
+        }
+    });
 }
 
 /// Stacked per-axis plots each get a third of the panel, less the axis label

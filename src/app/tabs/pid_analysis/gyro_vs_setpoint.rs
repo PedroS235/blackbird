@@ -9,7 +9,8 @@ const SETPOINT_COLOR: Color32 = Color32::WHITE;
 pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
     let t0 = fd.start_us();
     let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
-    let plot_height = stacked_plot_height(ui, 3);
+    let drawn = Axis::ALL.iter().filter(|&&a| fd.gyro(a).is_some()).count();
+    let plot_height = stacked_plot_height(ui, drawn);
 
     for axis in Axis::ALL {
         let Some(gyro) = fd.gyro(axis) else {

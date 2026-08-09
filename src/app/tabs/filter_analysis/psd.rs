@@ -1,7 +1,7 @@
 use egui::{Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 
-use super::PEAK_MARKER_COLOR;
+use super::{PEAK_MARKER_COLOR, drawn_axes};
 use crate::analysis::SpectralAnalysis;
 use crate::app::tabs::{GYRO_AXIS_COLORS, GYRO_RAW_COLOR, stacked_plot_height};
 use crate::parser::{Axis, PerAxis};
@@ -18,7 +18,7 @@ pub(super) struct Psd {
 
 impl Psd {
     pub(super) fn show(&mut self, ui: &mut Ui, analysis: &SpectralAnalysis) {
-        let plot_height = stacked_plot_height(ui, 3);
+        let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
 
         for axis in Axis::ALL {
             let Some(spec) = analysis.axis(axis) else {

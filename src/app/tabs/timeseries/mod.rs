@@ -4,7 +4,7 @@ mod rssi;
 
 use egui::Ui;
 
-use super::TabCtx;
+use super::{TabCtx, tab_bar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum TimeseriesTab {
@@ -45,18 +45,27 @@ impl Timeseries {
         };
         self.resolve(available);
 
-        ui.horizontal(|ui| {
-            for (tab, label) in [
-                (TimeseriesTab::Gyro, "Gyro"),
-                (TimeseriesTab::PowerBattery, "Power & Battery"),
-                (TimeseriesTab::Rssi, "Receiver RSSI"),
-            ] {
-                let selectable = egui::Button::selectable(self.selected == tab, label);
-                if ui.add_enabled(available.has(tab), selectable).clicked() {
-                    self.selected = tab;
-                }
-            }
-        });
+        tab_bar(
+            ui,
+            &mut self.selected,
+            &[
+                (
+                    TimeseriesTab::Gyro,
+                    "Gyro",
+                    available.has(TimeseriesTab::Gyro),
+                ),
+                (
+                    TimeseriesTab::PowerBattery,
+                    "Power & Battery",
+                    available.has(TimeseriesTab::PowerBattery),
+                ),
+                (
+                    TimeseriesTab::Rssi,
+                    "Receiver RSSI",
+                    available.has(TimeseriesTab::Rssi),
+                ),
+            ],
+        );
         ui.add_space(4.0);
 
         match self.selected {
