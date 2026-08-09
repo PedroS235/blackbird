@@ -8,7 +8,7 @@ use crate::ai::{self, PidGains};
 use crate::analysis::{
     AxisStepResponse, NoStepResponse, StepMetrics, StepResponseAnalysis, StepResponseAnalyzer,
 };
-use crate::app::tabs::{TabCtx, get_axis_color, stacked_plot_height_reserving};
+use crate::app::tabs::{TabCtx, get_axis_color, stacked_plot_height_of};
 use crate::app::ui::ai_feedback;
 use crate::parser::Axis;
 
@@ -123,6 +123,12 @@ impl StepResponse {
         let dragging = self.show_knobs(ui, ctx.flight.duration_s() / 4.0);
         ui.add_space(4.0);
 
+        // Taken out before the analysis borrows `self` for the rest of the
+        // frame: `step` ties up `self` until the closure below is done with
+        // it, which a field access through `self` — the button — cannot
+        // wait out. Put back once `step` is no longer needed.
+        let mut feedback = std::mem::take(&mut self.feedback);
+
         // Copied out before the analysis borrows `self` for the rest of the
         // frame — the plots read it, the recompute owns everything else.
         let show_individual = self.show_individual;
@@ -130,31 +136,42 @@ impl StepResponse {
 
         // Only the axes that draw share the height: a craft logging one axis
         // gets a full-size plot, not a third of the panel and two dead gaps.
+        // Captured before the scroll area below, whose content height a `Ui`
+        // reports as unbounded rather than the viewport's real size.
         let drawn = Axis::ALL.iter().filter(|&&a| step.axis(a).is_ok()).count();
-        let plot_height = stacked_plot_height_reserving(ui, drawn, ai_feedback::RESERVE_HEIGHT);
+        let available = ui.available_height();
+        let plot_height = stacked_plot_height_of(available, drawn, ai_feedback::RESERVE_HEIGHT);
 
-        for axis in Axis::ALL {
-            match step.axis(axis) {
-                Ok(response) => show_axis(ui, axis, response, plot_height, show_individual),
-                Err(reason) => {
-                    ui.label(RichText::new(axis.name()).strong());
-                    ui.label(explain(axis, reason));
-                    ui.add_space(8.0);
+        // An axis with no step response draws two label lines instead of a
+        // plot — shorter than `plot_height` budgeted for, not longer, but
+        // enough of them (or a long AI response below) can still add up to
+        // more than fit. The scroll area is the safety net for that, not the
+        // usual case: when everything fits, no scrollbar appears and this
+        // looks exactly like a fixed layout.
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for axis in Axis::ALL {
+                match step.axis(axis) {
+                    Ok(response) => show_axis(ui, axis, response, plot_height, show_individual),
+                    Err(reason) => {
+                        ui.label(RichText::new(axis.name()).strong());
+                        ui.label(explain(axis, reason));
+                        ui.add_space(8.0);
+                    }
                 }
             }
-        }
 
-        // Built from `step` while its borrow is still alive, so the button
-        // below is free to borrow `self.feedback` on its own.
-        let pid = PidGains {
-            roll: ctx.metadata.raw_headers.get("rollPID").map(String::as_str),
-            pitch: ctx.metadata.raw_headers.get("pitchPID").map(String::as_str),
-            yaw: ctx.metadata.raw_headers.get("yawPID").map(String::as_str),
-        };
-        let message = ai::step_response_message(step, &pid);
+            let pid = PidGains {
+                roll: ctx.metadata.raw_headers.get("rollPID").map(String::as_str),
+                pitch: ctx.metadata.raw_headers.get("pitchPID").map(String::as_str),
+                yaw: ctx.metadata.raw_headers.get("yawPID").map(String::as_str),
+            };
+            let message = ai::step_response_message(step, &pid);
 
-        ui.add_space(8.0);
-        ai_feedback::show(ui, &mut self.feedback, || message);
+            ui.add_space(8.0);
+            ai_feedback::show(ui, &mut feedback, || message);
+        });
+
+        self.feedback = feedback;
     }
 
     /// At the defaults the load-time analysis is exactly what these knobs

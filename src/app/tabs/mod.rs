@@ -106,13 +106,15 @@ fn tab_bar<T: Copy + PartialEq>(ui: &mut Ui, selected: &mut T, tabs: &[(T, &str,
 /// Stacked per-axis plots each get a third of the panel, less the axis label
 /// above them, and never collapse to nothing on a short window.
 fn stacked_plot_height(ui: &Ui, rows: usize) -> f32 {
-    stacked_plot_height_reserving(ui, rows, 0.0)
+    stacked_plot_height_of(ui.available_height(), rows, 0.0)
 }
 
-/// Same division, but `reserve` px of the panel are held back below the
-/// stack first — for a panel with something drawn after the plots (the
-/// "ask AI" button), which `stacked_plot_height` would otherwise size out of
-/// the visible area by handing the plots every pixel there was.
-pub(super) fn stacked_plot_height_reserving(ui: &Ui, rows: usize, reserve: f32) -> f32 {
-    ((ui.available_height() - reserve) / rows.max(1) as f32 - 24.0).max(80.0)
+/// The actual division, over an explicit height rather than reading it off a
+/// `Ui` — needed inside a `ScrollArea`, whose content height a `Ui` reports
+/// as unbounded rather than the viewport's real size. Callers that scroll
+/// capture `ui.available_height()` *before* entering the scroll area and
+/// pass that in, so the common case (everything fits) still sizes exactly
+/// as `stacked_plot_height` always has, with no scrollbar appearing.
+pub(super) fn stacked_plot_height_of(height: f32, rows: usize, reserve: f32) -> f32 {
+    ((height - reserve) / rows.max(1) as f32 - 24.0).max(80.0)
 }
