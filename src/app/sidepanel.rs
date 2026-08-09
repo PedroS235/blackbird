@@ -1,4 +1,5 @@
-use egui::{Color32, FontId, Layout, RichText, vec2};
+use egui::{Color32, FontId, Layout, RichText, Vec2, vec2};
+use elegance::Button;
 
 use super::{BlackbirdApp, ui};
 
@@ -7,29 +8,16 @@ impl BlackbirdApp {
         egui::Panel::left("sidepanel")
             .resizable(false)
             .exact_size(300.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::Image::new(egui::include_image!(
-                                "../../assets/blackbird-icon.png"
+                                "../../assets/blackbird_banner.png"
                             ))
-                            .max_size(vec2(36.0, 36.0)),
+                            .fit_to_exact_size(Vec2::new(300.0, 100.0)),
                         );
-                        ui.add_space(8.0);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new(self.app_name)
-                                    .font(FontId::proportional(22.0))
-                                    .color(Color32::ORANGE),
-                            );
-                            ui.label(
-                                RichText::new("Blackbox Analyzer")
-                                    .font(FontId::proportional(11.0))
-                                    .color(Color32::GRAY),
-                            );
-                        });
                     });
 
                     ui.add_space(12.0);
@@ -39,7 +27,7 @@ impl BlackbirdApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Logs").strong());
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("+ Add Log(s)").clicked() {
+                            if ui.add(Button::new("+ Add Log(s)")).clicked() {
                                 self.open_logs();
                             }
                         });

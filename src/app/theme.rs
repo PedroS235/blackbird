@@ -2,7 +2,7 @@ use egui::{FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 
 pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
-    elegance::Theme::slate().install(ctx);
+    elegance::Theme::charcoal().install(ctx);
 
     // elegance sets text styles to plain Proportional; re-point Heading and
     // Button at the heavier Inter weights we loaded above.

@@ -8,7 +8,7 @@ use logging::init_logging;
 fn main() {
     init_logging();
 
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/blackbird-icon.png"))
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/blackbird_logo.png"))
         .expect("The icon data must be valid");
 
     let options = eframe::NativeOptions {

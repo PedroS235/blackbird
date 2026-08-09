@@ -3,6 +3,7 @@ mod pid_analysis;
 mod timeseries;
 
 use egui::{Color32, Ui};
+use elegance::Accent;
 
 use crate::analysis::Analysis;
 use crate::parser::{FlightData, Metadata, ParsedLog, PerAxis};
@@ -84,7 +85,12 @@ impl Tabs {
 fn tab_bar<T: Copy + PartialEq>(ui: &mut Ui, selected: &mut T, tabs: &[(T, &str, bool)]) {
     ui.horizontal(|ui| {
         for &(tab, label, enabled) in tabs {
-            let button = egui::Button::selectable(*selected == tab, label);
+            let button = if *selected == tab {
+                elegance::Button::new(label)
+            } else {
+                elegance::Button::new(label).outline()
+            };
+
             if ui.add_enabled(enabled, button).clicked() {
                 *selected = tab;
             }
