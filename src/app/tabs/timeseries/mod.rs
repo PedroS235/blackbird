@@ -25,6 +25,8 @@ struct Available {
 impl Available {
     fn has(self, tab: TimeseriesTab) -> bool {
         match tab {
+            // Unconditional, and now honestly so: the Gyro panel falls back to
+            // the filtered trace, and says why when there is no gyro at all.
             TimeseriesTab::Gyro => true,
             TimeseriesTab::PowerBattery => self.power,
             TimeseriesTab::Rssi => self.rssi,
@@ -45,27 +47,13 @@ impl Timeseries {
         };
         self.resolve(available);
 
-        tab_bar(
-            ui,
-            &mut self.selected,
-            &[
-                (
-                    TimeseriesTab::Gyro,
-                    "Gyro",
-                    available.has(TimeseriesTab::Gyro),
-                ),
-                (
-                    TimeseriesTab::PowerBattery,
-                    "Power & Battery",
-                    available.has(TimeseriesTab::PowerBattery),
-                ),
-                (
-                    TimeseriesTab::Rssi,
-                    "Receiver RSSI",
-                    available.has(TimeseriesTab::Rssi),
-                ),
-            ],
-        );
+        let tabs = [
+            (TimeseriesTab::Gyro, "Gyro"),
+            (TimeseriesTab::PowerBattery, "Power & Battery"),
+            (TimeseriesTab::Rssi, "Receiver RSSI"),
+        ]
+        .map(|(tab, label)| (tab, label, available.has(tab)));
+        tab_bar(ui, &mut self.selected, &tabs);
         ui.add_space(4.0);
 
         match self.selected {
@@ -76,7 +64,8 @@ impl Timeseries {
     }
 
     /// Switching to a log that lacks the channel you were looking at drops you
-    /// back on Gyro, which every log has, rather than on a blank panel.
+    /// back on Gyro, which always has something to say, rather than on a blank
+    /// panel.
     fn resolve(&mut self, available: Available) {
         if !available.has(self.selected) {
             self.selected = TimeseriesTab::Gyro;

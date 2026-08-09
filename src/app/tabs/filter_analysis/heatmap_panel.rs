@@ -47,6 +47,22 @@ impl HeatmapKind {
             Self::Spectrogram => format!("{} spectrogram", axis.name()),
         }
     }
+
+    /// A log can carry the raw gyro and still have nothing to bin it against.
+    /// Neither case is a broken log, and neither may go blank.
+    fn nothing_to_bin(self) -> &'static str {
+        match self {
+            Self::VsThrottle => {
+                "No throttle in this log — this map bins the noise by stick position, so without \
+                 rcCommand[3] there is nothing to bin against. Enable the RC Commands field in \
+                 Betaflight's Blackbox tab and fly again."
+            }
+            Self::Spectrogram => {
+                "No time reference in this log — the spectrogram bins the noise over the flight, \
+                 and this log carries no timestamps to bin against."
+            }
+        }
+    }
 }
 
 pub(super) struct HeatmapPanel {
@@ -61,6 +77,13 @@ impl Default for HeatmapPanel {
 
 impl HeatmapPanel {
     pub(super) fn show(&mut self, ui: &mut Ui, kind: HeatmapKind, rows: Vec<HeatmapRow<'_>>) {
+        // Before the slider: a sensitivity control over dead space is the same
+        // blank panel, only with something to fiddle with.
+        if rows.is_empty() {
+            ui.label(kind.nothing_to_bin());
+            return;
+        }
+
         ui.add(
             Slider::new(&mut self.floor_db, -120.0..=-5.0)
                 .label("sensitivity (noise floor dB)")

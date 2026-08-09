@@ -1,4 +1,4 @@
-Status: todo
+Status: done
 Type: task
 
 # A log without `gyroUnfilt` opens on a blank panel and never says why
@@ -57,6 +57,29 @@ treatment, since its emptiness has the same cause and a different remedy.
 ## Out of Scope
 
 - Synthesising a raw trace from the filtered one.
+
+## Answer
+
+Shapes 1 and 3, which compose, both landed on 2026-08-09. Shape 2 was not
+taken: making availability data-driven still needs an answer for a log that can
+render nothing, and the explanation is that answer wherever the pilot lands.
+
+- **Gyro tab** — a `Traces` classifier over the flight data decides between
+  raw-and-filtered, filtered-only and nothing. Filtered-only draws the filtered
+  trace, already labelled `(filtered)` by the existing series label, under a
+  note naming `gyroUnfilt` and `set debug_mode = GYRO_SCALED`. No gyro at all
+  gets its own message rather than the fallback's.
+- **Filter Analysis** — the raw signal is the point there, so no fallback: when
+  no axis was analysed, one message above all four sub-tabs, which go blank
+  together and for one reason.
+- `Available::has` keeps `Gyro => true`. It is now honest rather than a hope.
+
+The review of the change turned up two more panels of the same class, fixed
+here rather than left for the next report: a log with the raw gyro but no
+throttle (or no timestamps) left Vs Reference and Spectrogram drawing a
+sensitivity slider over dead space, and Gyro Vs Setpoint went blank on a log
+without `gyroADC` while its sibling Step Response explained every empty exit.
+Both heatmap sub-tabs now also grey out when the log cannot fill them.
 
 ## Comments
 

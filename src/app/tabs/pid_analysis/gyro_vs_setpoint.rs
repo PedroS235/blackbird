@@ -6,10 +6,20 @@ use crate::parser::{Axis, FlightData};
 
 const SETPOINT_COLOR: Color32 = Color32::WHITE;
 
+/// The sibling Step Response sub-tab explains every one of its empty exits;
+/// this one may not be the odd panel out.
+const NO_GYRO: &str = "No gyroADC in this log — nothing recorded how the craft answered the \
+                       sticks. Enable the Gyro field in Betaflight's Blackbox tab and fly again.";
+
 pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
     let t0 = fd.start_us();
     let duration_s = fd.duration_s().max(f64::MIN_POSITIVE);
     let drawn = Axis::ALL.iter().filter(|&&a| fd.gyro(a).is_some()).count();
+    if drawn == 0 {
+        ui.label(NO_GYRO);
+        return;
+    }
+
     let plot_height = stacked_plot_height(ui, drawn);
 
     for axis in Axis::ALL {
