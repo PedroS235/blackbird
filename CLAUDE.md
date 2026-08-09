@@ -29,8 +29,8 @@ FPV language: looptime, P/D balance, prop wash, notch filters, RPM filtering.
   processing documentation
 - **AI from day one** — the data model is designed so that every computed metric
   is serialisable into an AI prompt context. The AI layer is not bolted on later
-- **Offline capable** — core analysis works without internet. AI requires either
-  an Anthropic API key (cloud) or a local model via Ollama
+- **Offline capable** — core analysis works without internet. AI requires an
+  OpenAI API key (`OPENAI_API_KEY` env var), via the `rig` crate
 - **Parser abstraction** — the `blackbox-log` crate is wrapped in a thin internal
   module. Its types never leak into the rest of the codebase. Swappable
 - **Clean separation** — analysis modules know nothing about UI. UI knows nothing
@@ -72,10 +72,8 @@ src/
 │   └── filter_delay.rs      ← cross-correlation, delay estimation in ms
 │
 ├── ai/
-│   ├── mod.rs               ← LlmBackend trait
-│   ├── anthropic.rs         ← Anthropic API client via reqwest
-│   ├── ollama.rs            ← local model fallback
-│   └── prompt.rs            ← prompt builder from AnalysisResult + HeaderData
+│   ├── mod.rs               ← Feedback state machine, backgrounded rig/OpenAI call
+│   └── prompt.rs            ← per-panel message builders (step response, PSD)
 │
 └── ui/
     ├── mod.rs
@@ -237,41 +235,51 @@ where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer
 
 ## AI integration
 
-### LlmBackend trait
+First cut, validated by the prototype at `.scratch/agent-feedback/` (primary
+source on branch `prototype/agent-feedback`) before landing here. Superseded
+the original `LlmBackend` trait / `TuneContext` design below — no trait, no
+Anthropic, no Ollama, on this pass. `rig` (`rig::providers::openai`) drives an
+agentic OpenAI call directly; per-panel, not per-log.
+
+### `ai::Feedback` (mod.rs)
+
+One button, one call, one answer — a state machine rather than a trait, since
+there is exactly one backend and one shape of question so far:
 
 ```rust
-pub trait LlmBackend: Send + Sync {
-    async fn analyse(&self, context: &TuneContext) -> Result<AnalysisStream>;
+pub enum Feedback {
+    Idle,
+    Loading(Request),           // fired on a background thread
+    Done(Result<String, String>),
 }
 ```
 
-Two implementations:
+`Request::spawn` runs the call on `std::thread::spawn` + a throwaway
+single-use `tokio::runtime::Runtime`, and reports back over an
+`std::sync::mpsc` channel that the panel polls once per frame — no async
+runtime lives in `app.rs`, and the module never touches egui.
 
-- `AnthropicBackend` — calls `api.anthropic.com/v1/messages`, streams response
-- `OllamaBackend` — calls local Ollama instance, offline fallback
+### Per-panel messages (prompt.rs)
 
-### TuneContext
+No `TuneContext`, no `HeaderData` yet — the two panels wired so far
+(`Step Response`, `PSD`) each build their own plain-text message straight
+from the analysis types they already hold (`StepResponseAnalysis`,
+`SpectralAnalysis`), plus `PidGains` (raw `rollPID`/`pitchPID`/`yawPID`
+strings out of `Metadata::raw_headers` — there's no structured PID field
+yet). One preamble is shared by both; it tells the model to reason before
+recommending, and to keep step response (PID) and PSD (filters) separate so
+it never suggests a PID change for a filtering problem or vice versa.
 
-What gets sent to the model. Structured, not raw timeseries.
+### Original design (not yet built)
 
-```rust
-pub struct TuneContext {
-    pub header: HeaderData,         // current PID/filter values, craft info
-    pub analysis: AnalysisResult,   // computed metrics
-    pub pilot_notes: Option<String> // free text from the pilot ("prop wash on fast turns")
-}
-```
+The `LlmBackend` trait, `AnthropicBackend`/`OllamaBackend`, and a unified
+`TuneContext` (header + full `AnalysisResult` + pilot notes) sent once per
+log are still the eventual shape if a second backend or a whole-log prompt
+is ever needed — nothing above forecloses it, it just isn't built yet.
 
-### Prompt design (prompt.rs)
+### Prompt output format
 
-The system prompt encodes PID tuning expertise:
-
-- What each metric means in FPV context
-- Known diagnostic relationships (overshoot > 10% → P/D imbalance, etc.)
-- Valid Betaflight CLI syntax for suggested changes
-- Output format: Diagnosis → Recommended changes → Betaflight CLI block
-
-The CLI block must be copyable directly into Betaflight configurator.
+Diagnosis → Recommended changes → a copy-pasteable Betaflight CLI block.
 This is the killer feature — not just diagnosis but ready-to-paste commands.
 
 ---
@@ -309,11 +317,11 @@ Goal: load a log, see the data. Validate the full parser → UI pipeline.
 
 ### Milestone 3 — AI Integration
 
-- [ ] `ai/prompt.rs` — TuneContext → prompt
-- [ ] `ai/anthropic.rs` — streaming API client
-- [ ] `ai/ollama.rs` — local fallback
-- [ ] `ui/panels/ai_panel.rs` — streaming response + copyable CLI block
-- [ ] Settings panel — API key, model selection, backend toggle
+- [x] `ai/prompt.rs` — per-panel metrics → message (not yet a unified `TuneContext`)
+- [x] `ai/mod.rs` — OpenAI via `rig`, backgrounded, non-streaming (not Anthropic/Ollama)
+- [x] "Ask AI" button + response wired into Step Response and PSD panels
+- [ ] `ai_panel.rs` — dedicated streaming panel with a copyable CLI block
+- [ ] Settings panel — API key, model selection, backend toggle (currently `OPENAI_API_KEY` env var only)
 
 ### Future / Backlog
 
@@ -339,7 +347,7 @@ _(none yet — project is in initial setup)_
 | `blackbox-log` wrapped in thin internal module | Crate types must not leak. If we swap the crate, only `parser/` changes |
 | `AnalysisResult` feeds both UI and AI | Single source of truth. AI reasons over computed metrics, not raw floats |
 | `PlotState` lives in `app.rs`, passed to all panels | Future panels (spectral, step response) share the same time range and cursor |
-| AI as trait with two backends | Anthropic for quality, Ollama for offline/privacy. Swappable at runtime |
+| First AI cut is OpenAI via `rig`, no trait | Prototype (`.scratch/agent-feedback/`) validated OpenAI end-to-end; a trait for a second backend is easy to add later but wasn't worth it for one |
 | `prompt.rs` isolated from API plumbing | Prompt is a product decision iterated independently of transport code |
 
 ---

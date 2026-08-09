@@ -19,6 +19,8 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rig = "0.41.0"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 
 
 [patch.crates-io]

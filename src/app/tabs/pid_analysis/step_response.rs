@@ -4,10 +4,12 @@ use std::sync::Arc;
 use egui::{Color32, DragValue, RichText, Ui};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
+use crate::ai::{self, PidGains};
 use crate::analysis::{
     AxisStepResponse, NoStepResponse, StepMetrics, StepResponseAnalysis, StepResponseAnalyzer,
 };
 use crate::app::tabs::{TabCtx, get_axis_color, stacked_plot_height};
+use crate::app::ui::ai_feedback;
 use crate::parser::Axis;
 
 /// Individual traces are background: the eye should read the spread as a band,
@@ -69,6 +71,7 @@ pub(super) struct StepResponse {
     show_individual: bool,
     analyzer: StepResponseAnalyzer,
     cached: Option<Cached>,
+    feedback: ai::Feedback,
 }
 
 impl Default for StepResponse {
@@ -79,6 +82,7 @@ impl Default for StepResponse {
             show_individual: true,
             analyzer: StepResponseAnalyzer::default(),
             cached: None,
+            feedback: ai::Feedback::default(),
         }
     }
 }
@@ -139,6 +143,18 @@ impl StepResponse {
                 }
             }
         }
+
+        // Built from `step` while its borrow is still alive, so the button
+        // below is free to borrow `self.feedback` on its own.
+        let pid = PidGains {
+            roll: ctx.metadata.raw_headers.get("rollPID").map(String::as_str),
+            pitch: ctx.metadata.raw_headers.get("pitchPID").map(String::as_str),
+            yaw: ctx.metadata.raw_headers.get("yawPID").map(String::as_str),
+        };
+        let message = ai::step_response_message(step, &pid);
+
+        ui.add_space(8.0);
+        ai_feedback::show(ui, &mut self.feedback, || message);
     }
 
     /// At the defaults the load-time analysis is exactly what these knobs

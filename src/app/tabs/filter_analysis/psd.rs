@@ -2,8 +2,10 @@ use egui::{Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 
 use super::{PEAK_MARKER_COLOR, drawn_axes};
+use crate::ai;
 use crate::analysis::SpectralAnalysis;
 use crate::app::tabs::{get_axis_color, stacked_plot_height};
+use crate::app::ui::ai_feedback;
 use crate::parser::{Axis, PerAxis};
 
 const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
@@ -14,6 +16,7 @@ const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
 #[derive(Default)]
 pub(super) struct Psd {
     filtered_visible: PerAxis<bool>,
+    feedback: ai::Feedback,
 }
 
 impl Psd {
@@ -92,5 +95,8 @@ impl Psd {
                     }
                 });
         }
+
+        ui.add_space(8.0);
+        ai_feedback::show(ui, &mut self.feedback, || ai::psd_message(analysis));
     }
 }
