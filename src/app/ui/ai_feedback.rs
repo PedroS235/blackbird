@@ -8,6 +8,13 @@ use egui_phosphor::regular::OPEN_AI_LOGO;
 
 use crate::ai::Feedback;
 
+/// How much of a panel's height to hold back for this widget when it sits
+/// below plots sized by `stacked_plot_height_reserving` — enough for the
+/// button row; a shown response scrolls within `RESPONSE_MAX_HEIGHT` rather
+/// than claiming more.
+pub const RESERVE_HEIGHT: f32 = 48.0;
+const RESPONSE_MAX_HEIGHT: f32 = 220.0;
+
 /// `build_message` runs only on click, so a panel that has never been asked
 /// pays nothing for formatting its metrics.
 pub fn show(ui: &mut Ui, feedback: &mut Feedback, build_message: impl FnOnce() -> String) {
@@ -29,9 +36,11 @@ pub fn show(ui: &mut Ui, feedback: &mut Feedback, build_message: impl FnOnce() -
     match feedback {
         Feedback::Done(Ok(text)) => {
             ui.add_space(4.0);
-            elegance::Card::new()
-                .heading("AI feedback")
-                .show(ui, |ui| ui.label(text.as_str()));
+            elegance::Card::new().heading("AI feedback").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(RESPONSE_MAX_HEIGHT)
+                    .show(ui, |ui| ui.label(text.as_str()));
+            });
         }
         Feedback::Done(Err(e)) => {
             ui.add_space(4.0);

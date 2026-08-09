@@ -8,7 +8,7 @@ use crate::ai::{self, PidGains};
 use crate::analysis::{
     AxisStepResponse, NoStepResponse, StepMetrics, StepResponseAnalysis, StepResponseAnalyzer,
 };
-use crate::app::tabs::{TabCtx, get_axis_color, stacked_plot_height};
+use crate::app::tabs::{TabCtx, get_axis_color, stacked_plot_height_reserving};
 use crate::app::ui::ai_feedback;
 use crate::parser::Axis;
 
@@ -131,7 +131,7 @@ impl StepResponse {
         // Only the axes that draw share the height: a craft logging one axis
         // gets a full-size plot, not a third of the panel and two dead gaps.
         let drawn = Axis::ALL.iter().filter(|&&a| step.axis(a).is_ok()).count();
-        let plot_height = stacked_plot_height(ui, drawn);
+        let plot_height = stacked_plot_height_reserving(ui, drawn, ai_feedback::RESERVE_HEIGHT);
 
         for axis in Axis::ALL {
             match step.axis(axis) {

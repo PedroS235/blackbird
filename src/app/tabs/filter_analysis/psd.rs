@@ -4,7 +4,7 @@ use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 use super::{PEAK_MARKER_COLOR, drawn_axes};
 use crate::ai;
 use crate::analysis::SpectralAnalysis;
-use crate::app::tabs::{get_axis_color, stacked_plot_height};
+use crate::app::tabs::{get_axis_color, stacked_plot_height_reserving};
 use crate::app::ui::ai_feedback;
 use crate::parser::{Axis, PerAxis};
 
@@ -21,7 +21,8 @@ pub(super) struct Psd {
 
 impl Psd {
     pub(super) fn show(&mut self, ui: &mut Ui, analysis: &SpectralAnalysis) {
-        let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
+        let plot_height =
+            stacked_plot_height_reserving(ui, drawn_axes(analysis), ai_feedback::RESERVE_HEIGHT);
 
         for axis in Axis::ALL {
             let Some(spec) = analysis.axis(axis) else {
