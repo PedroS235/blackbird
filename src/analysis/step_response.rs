@@ -24,6 +24,9 @@ pub struct StepResponseAnalyzer {
     pub lambda_k: f64,
     /// Windows where the sticks barely moved deconvolve to noise.
     pub min_setpoint_dps: f64,
+    /// Cut off each end of the log. The craft is on the ground there, or in a
+    /// hand, and it answers the sticks like something else entirely.
+    pub trim_s: f64,
     /// Covers rise, overshoot and settle at FPV timescales.
     pub response_ms: f64,
     /// The stretch of the response averaged to find the steady state each
@@ -48,6 +51,7 @@ impl Default for StepResponseAnalyzer {
             hop_s: 1.0 / 16.0,
             lambda_k: 0.01,
             min_setpoint_dps: 52.0,
+            trim_s: super::DEFAULT_TRIM_S,
             response_ms: 500.0,
             tail_ms: 100.0,
             steady_state_band: 0.5..=3.0,
@@ -268,6 +272,7 @@ fn hann(len: usize) -> Vec<f64> {
 
 impl StepResponseAnalyzer {
     pub fn analyze(&self, fd: &FlightData) -> StepResponseAnalysis {
+        let fd = fd.trimmed(self.trim_s);
         let plan = self.plan(fd.sample_rate_hz());
 
         StepResponseAnalysis {
@@ -468,6 +473,49 @@ mod test {
             )
             .with_channel(Channel::Setpoint(Axis::Roll), setpoint)
             .with_channel(Channel::Gyro(Axis::Roll), gyro)
+    }
+
+    /// A log's ends are the craft on the ground and the hand launch, which
+    /// answer the sticks like a different craft. Cutting them off has to bring
+    /// the recovered overshoot back to the airborne system's.
+    #[test]
+    fn the_ends_of_the_log_do_not_reach_the_curve() {
+        let (freq_hz, damping) = (20.0, 0.4);
+        let setpoint = stick_input(32_000, 200.0);
+        let mut gyro = second_order(&setpoint, freq_hz, damping);
+
+        // Two seconds each end of a wallowing, overshoot-free craft.
+        let grounded = second_order(&setpoint, 5.0, 1.0);
+        let ends = 2 * FS as usize;
+        gyro[..ends].copy_from_slice(&grounded[..ends]);
+        let tail = gyro.len() - ends;
+        gyro[tail..].copy_from_slice(&grounded[tail..]);
+
+        let log = log_with(setpoint, gyro);
+        let overshoot = |trim_s| {
+            StepResponseAnalyzer {
+                trim_s,
+                ..Default::default()
+            }
+            .analyze(&log)
+            .axis(Axis::Roll)
+            .expect("roll analysed")
+            .metrics
+            .overshoot_pct
+        };
+
+        let root = (1.0f64 - damping * damping).sqrt();
+        let expected = 100.0 * (-std::f64::consts::PI * damping / root).exp();
+        let (trimmed, whole) = (overshoot(2.0), overshoot(0.0));
+
+        assert!(
+            (trimmed - expected).abs() < (whole - expected).abs(),
+            "trimmed {trimmed:.0}% is no closer to {expected:.0}% than untrimmed {whole:.0}%"
+        );
+        assert!(
+            (trimmed - expected).abs() < 5.0,
+            "expected {expected:.0}% overshoot, got {trimmed:.0}%"
+        );
     }
 
     /// The whole point: push a setpoint through a system whose overshoot is
@@ -743,7 +791,11 @@ mod test {
     fn axes_without_setpoint_or_gyro_say_which_field_is_missing() {
         let setpoint = stick_input(24_000, 200.0);
         let gyro = second_order(&setpoint, 20.0, 0.4);
-        let log = log_with(setpoint, gyro).with_channel(Channel::Setpoint(Axis::Pitch), vec![0.0]);
+        // Long enough to survive trimming — this is "gyro missing", not
+        // "setpoint too short to reach past the trimmed ends".
+        let n = setpoint.len();
+        let log =
+            log_with(setpoint, gyro).with_channel(Channel::Setpoint(Axis::Pitch), vec![0.0; n]);
 
         let analysis = StepResponseAnalyzer::default().analyze(&log);
 

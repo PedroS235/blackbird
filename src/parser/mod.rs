@@ -2,7 +2,7 @@ mod flight_data;
 pub mod metadata;
 mod sample_rate;
 
-pub use flight_data::{Axis, Channel, FlightData, PerAxis};
+pub use flight_data::{Axis, Channel, FlightData, PerAxis, Trimmed};
 pub use metadata::Metadata;
 pub use sample_rate::SampleRateEstimate;
 

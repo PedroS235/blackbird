@@ -181,6 +181,7 @@ pub struct FilterDelayResult {
 - Output: dB per frequency bin per throttle bin → 2D heatmap
 - Formula: `amplitude_db = 20.0 * log10(magnitude)`
 - Input signal: `gyro_raw` (pre-filter gyro, not post-filter)
+- Analysed over `FlightData::trimmed(trim_s)`, not the whole log — see below
 
 ### Step response
 
@@ -205,6 +206,14 @@ where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer
 - Reject a trace whose steady state falls outside `0.5..=3.0` — including any
   negative one, which would otherwise be flipped upright into the mean
 - Reject windows where `max |setpoint| < 52 deg/s`; no throttle gating
+- Both analysers run over the log's middle: `FlightData::trimmed(trim_s)` is a
+  view (no copy) that drops the first and last `trim_s`, 2 s by default. The
+  ends are arming, the hand launch and the landing — ground resonance the
+  spectral analysis would report as flight noise, and stick input answered by a
+  craft that is not airborne. Trimming is skipped when it would take more than
+  half the log, so a short bench log is still analysed whole. Trimmed time
+  values stay relative to the untrimmed start, so the spectrogram lines up with
+  the timeseries plots
 - Defaults match PID-Analyzer (`framelen = 1.0`, `superpos = 16`,
   `np.hanning`). The panel exposes window, hop, minimum stick input, λ and the
   two ends of the band as knobs; `tail_ms`, `response_ms` and `max_traces`

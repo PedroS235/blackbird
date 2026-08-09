@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::parser::SampleRateEstimate;
@@ -240,6 +241,94 @@ impl FlightData {
     pub fn throttle(&self) -> Option<&[f64]> {
         self.channel(Channel::Throttle)
     }
+
+    /// The log without its first and last `trim_s` — arming, the hand launch,
+    /// the landing or the crash. None of that is flight, but all of it is
+    /// motor noise the spectral analysis would report and stick movement the
+    /// deconvolution would answer for.
+    ///
+    /// A view, not a copy: a five-minute log at 8 kHz is tens of megabytes per
+    /// channel.
+    pub fn trimmed(&self, trim_s: f64) -> Trimmed<'_> {
+        Trimmed {
+            fd: self,
+            span: self.analysis_span(trim_s),
+        }
+    }
+
+    /// Trimming has to leave at least half the log standing. Below that the
+    /// log is too short for its ends to be a distinguishable part of it, and a
+    /// four-second bench test would become a zero-second one.
+    fn analysis_span(&self, trim_s: f64) -> Range<usize> {
+        let full = 0..self.time_us.len();
+        if trim_s <= 0.0 || self.duration_s() < 4.0 * trim_s {
+            return full;
+        }
+
+        let cut = (trim_s * 1e6) as u64;
+        let last = self.time_us.last().copied().unwrap_or_default();
+        let start = self.time_us.partition_point(|&t| t < self.start_us() + cut);
+        let end = self.time_us.partition_point(|&t| t <= last - cut);
+
+        // A corrupt frame can decode a backwards timestamp, and a binary
+        // search over an axis that is not sorted returns any index at all —
+        // including an end before the start, which would panic on slicing.
+        start..end.max(start)
+    }
+}
+
+/// A span of one log, addressed by the accessors the analysers use, so one
+/// reads `trimmed` where it read `FlightData` and nothing else about it
+/// changes. Not every accessor: a channel gets one here when an analyser
+/// wants it.
+#[derive(Debug, Clone)]
+pub struct Trimmed<'a> {
+    fd: &'a FlightData,
+    span: Range<usize>,
+}
+
+impl Trimmed<'_> {
+    /// `None` where the whole log has none — and where a channel the parser
+    /// filled short of the time axis ends before the span does, because an
+    /// analyser handed an empty signal blames the log's length for what is
+    /// really a field the craft never logged.
+    pub fn channel(&self, channel: Channel) -> Option<&[f64]> {
+        let samples = self.fd.channel(channel)?;
+        let end = self.span.end.min(samples.len());
+        samples
+            .get(self.span.start.min(end)..end)
+            .filter(|s| !s.is_empty() || samples.is_empty())
+    }
+
+    pub fn gyro_raw(&self, axis: Axis) -> Option<&[f64]> {
+        self.channel(Channel::RawGyro(axis))
+    }
+
+    pub fn gyro(&self, axis: Axis) -> Option<&[f64]> {
+        self.channel(Channel::Gyro(axis))
+    }
+
+    pub fn setpoint(&self, axis: Axis) -> Option<&[f64]> {
+        self.channel(Channel::Setpoint(axis))
+    }
+
+    pub fn throttle(&self) -> Option<&[f64]> {
+        self.channel(Channel::Throttle)
+    }
+
+    pub fn sample_rate_hz(&self) -> f64 {
+        self.fd.sample_rate_hz()
+    }
+
+    /// Still measured from the untrimmed start, so a bin the spectrogram draws
+    /// at 2 s lines up with 2 s on every timeseries plot.
+    pub fn time_s(&self) -> Vec<f64> {
+        let t0 = self.fd.start_us();
+        self.fd.time_us[self.span.clone()]
+            .iter()
+            .map(|&t| t.saturating_sub(t0) as f64 / 1e6)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +375,73 @@ mod test {
         assert_eq!(fd.start_us(), 5_000_000);
         assert_eq!(fd.duration_s(), 1.0);
         assert_eq!(fd.time_s(), vec![0.0, 0.5, 1.0]);
+    }
+
+    /// 1 kHz, `seconds` long, one channel counting samples so a slice is
+    /// identifiable by its contents.
+    fn log_of(seconds: u64) -> FlightData {
+        let n = seconds * 1000 + 1;
+        FlightData::default()
+            .with_time((0..n).map(|i| 7_000_000 + i * 1000).collect())
+            .with_channel(
+                Channel::Gyro(Axis::Roll),
+                (0..n).map(|i| i as f64).collect(),
+            )
+    }
+
+    #[test]
+    fn trimming_cuts_both_ends_and_keeps_the_middle() {
+        let fd = log_of(20);
+        let trimmed = fd.trimmed(2.0);
+
+        assert_eq!(
+            trimmed.gyro(Axis::Roll),
+            Some(&fd.gyro(Axis::Roll).unwrap()[2_000..18_001])
+        );
+    }
+
+    /// The spectrogram's x axis is drawn from these, over plots of the whole
+    /// log — a trimmed bin at 2 s must still say 2 s.
+    #[test]
+    fn trimmed_time_stays_relative_to_the_untrimmed_start() {
+        let time = log_of(20).trimmed(2.0).time_s();
+
+        assert_eq!(time.first().copied(), Some(2.0));
+        assert_eq!(time.last().copied(), Some(18.0));
+    }
+
+    /// Two seconds off each end of a six second log is most of it. A log that
+    /// short is analysed whole rather than analysed as almost nothing.
+    #[test]
+    fn a_log_too_short_to_spare_its_ends_is_kept_whole() {
+        let fd = log_of(6);
+        assert_eq!(fd.trimmed(2.0).gyro(Axis::Roll), fd.gyro(Axis::Roll));
+    }
+
+    #[test]
+    fn no_trim_keeps_every_sample() {
+        let fd = log_of(20);
+        assert_eq!(fd.trimmed(0.0).gyro(Axis::Roll), fd.gyro(Axis::Roll));
+        assert_eq!(FlightData::default().trimmed(2.0).gyro(Axis::Roll), None);
+    }
+
+    /// A channel the parser filled short of the time axis must slice, not
+    /// vanish.
+    #[test]
+    fn a_channel_shorter_than_the_time_axis_is_clamped() {
+        let fd = log_of(20).with_channel(Channel::Setpoint(Axis::Roll), vec![1.0; 5_000]);
+        let trimmed = fd.trimmed(2.0);
+
+        assert_eq!(trimmed.setpoint(Axis::Roll).map(<[f64]>::len), Some(3_000));
+    }
+
+    /// A channel that ends before the trim does is absent, not empty — an
+    /// analyser handed nothing blames the log's length for a field the craft
+    /// never logged.
+    #[test]
+    fn a_channel_ending_before_the_span_is_absent_rather_than_empty() {
+        let fd = log_of(20).with_channel(Channel::Setpoint(Axis::Roll), vec![1.0; 500]);
+        assert_eq!(fd.trimmed(2.0).setpoint(Axis::Roll), None);
     }
 
     #[test]

@@ -9,6 +9,9 @@ use crate::signal::fft::{self, BinnedSpectrum, Psd, SignalAnalyzer, Spectrum};
 #[derive(Debug, Clone)]
 pub struct GyroNoiseAnalyzer {
     pub throttle_bins: usize,
+    /// Cut off each end of the log. Props spinning on the ground resonate
+    /// through whatever the craft is sitting on, and that is not flight noise.
+    pub trim_s: f64,
     pub time_bins: usize,
     /// Peaks below this aren't reported — flight dynamics/stick input, not motor/prop noise.
     pub peak_search_min_hz: f64,
@@ -23,6 +26,7 @@ impl Default for GyroNoiseAnalyzer {
     fn default() -> Self {
         Self {
             throttle_bins: 10,
+            trim_s: super::DEFAULT_TRIM_S,
             time_bins: 60,
             peak_search_min_hz: 30.0,
             peak_min_above_floor_db: 6.0,
@@ -82,6 +86,7 @@ impl SpectralAnalysis {
 
 impl GyroNoiseAnalyzer {
     pub fn analyze(&self, fd: &FlightData, metadata: &Metadata) -> SpectralAnalysis {
+        let fd = fd.trimmed(self.trim_s);
         let fs = fd.sample_rate_hz();
         let throttle = fd.throttle();
         let time_ref = fd.time_s();
@@ -289,6 +294,44 @@ mod test {
             "expected peak near 200 Hz, got {} Hz",
             loudest.freq_hz
         );
+    }
+
+    /// Props spinning on the ground before the launch ring the frame at a
+    /// frequency the craft never saw in the air. Reporting it sends the pilot
+    /// notching a peak that is not there.
+    #[test]
+    fn noise_from_the_ends_of_the_log_is_not_reported_as_flight_noise() {
+        const FS: f64 = 2000.0;
+        let mut log = one_axis_log(200.0, FS, 40_000);
+        let ends = 2 * FS as usize;
+        let ground: Vec<f64> = (0..40_000)
+            .map(|i| (std::f64::consts::TAU * 350.0 * i as f64 / FS).sin() * 200.0)
+            .collect();
+
+        // The same log, but sitting on the ground for its first and last two
+        // seconds.
+        let mut raw = log.gyro_raw(Axis::Roll).unwrap().to_vec();
+        raw[..ends].copy_from_slice(&ground[..ends]);
+        let tail = raw.len() - ends;
+        raw[tail..].copy_from_slice(&ground[tail..]);
+        log = log.with_channel(Channel::RawGyro(Axis::Roll), raw);
+
+        let peaks_near = |trim_s, hz: f64| {
+            GyroNoiseAnalyzer {
+                trim_s,
+                ..Default::default()
+            }
+            .analyze(&log, &Metadata::default())
+            .axis(Axis::Roll)
+            .expect("roll analysed")
+            .peaks
+            .iter()
+            .any(|p| (p.freq_hz - hz).abs() < 10.0)
+        };
+
+        assert!(peaks_near(0.0, 350.0), "untrimmed misses the ground tone");
+        assert!(!peaks_near(2.0, 350.0), "the ground tone survived trimming");
+        assert!(peaks_near(2.0, 200.0), "the flight tone was trimmed away");
     }
 
     #[test]

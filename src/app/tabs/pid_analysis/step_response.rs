@@ -116,7 +116,7 @@ impl StepResponse {
             }
         });
 
-        let dragging = self.show_knobs(ui);
+        let dragging = self.show_knobs(ui, ctx.flight.duration_s() / 4.0);
         ui.add_space(4.0);
 
         // Copied out before the analysis borrows `self` for the rest of the
@@ -181,25 +181,30 @@ impl StepResponse {
     ///
     /// Returns whether a knob is under the pointer right now, which is what
     /// keeps a drag from re-running the stack on every frame of it.
-    fn show_knobs(&mut self, ui: &mut Ui) -> bool {
+    fn show_knobs(&mut self, ui: &mut Ui, max_trim_s: f64) -> bool {
         egui::CollapsingHeader::new("analysis parameters")
-            .show(ui, |ui| self.knob_grid(ui))
+            .show(ui, |ui| self.knob_grid(ui, max_trim_s))
             .body_returned
             .unwrap_or(false)
     }
 
-    fn knob_grid(&mut self, ui: &mut Ui) -> bool {
+    /// `max_trim_s` is this log's share to spare — past it the analyser stops
+    /// trimming altogether, so a knob that went further would jump the curve
+    /// back to the whole flight with nothing on screen saying why.
+    fn knob_grid(&mut self, ui: &mut Ui, max_trim_s: f64) -> bool {
         let d = StepResponseAnalyzer::default();
         let a = &mut self.analyzer;
         // The band is one field but two knobs, so it is taken apart here
         // and put back together below.
         let (mut low, mut high) = (*a.steady_state_band.start(), *a.steady_state_band.end());
+        let trim_cap = max_trim_s.max(a.trim_s);
+        let over_cap = a.trim_s > max_trim_s;
 
         // No response-length knob: `response_ms` sets where the steady-state
         // tail sits, so a control labelled "response length" re-normalised
         // every trace while implying it only changed the view. Looking closer
         // at the rise is plot zoom, which `egui_plot` already provides.
-        let knobs: [(&str, &mut f64, RangeInclusive<f64>, f64, &str, String); 6] = [
+        let knobs: [(&str, &mut f64, RangeInclusive<f64>, f64, &str, String); 7] = [
             (
                 "window",
                 &mut a.window_s,
@@ -225,6 +230,23 @@ impl StepResponse {
                     "How far the window moves between responses. Smaller stacks more \
                           traces and costs more time. Default {:.4} s.",
                     d.hop_s
+                ),
+            ),
+            (
+                "trim log ends",
+                &mut a.trim_s,
+                // Never below where it already sits: a `DragValue` writes its
+                // range back, so a short log would silently pull the knob off
+                // the default and make the panel recompute what it was handed.
+                0.0..=trim_cap,
+                0.1,
+                " s",
+                format!(
+                    "How much of each end of the log to leave out. The craft is arming, in a \
+                          hand or landing there, and it answers the sticks like something else. \
+                          Trimming never takes more than half a flight, so this log stops at \
+                          {max_trim_s:.1} s. Default {} s.",
+                    d.trim_s
                 ),
             ),
             (
@@ -302,6 +324,19 @@ impl StepResponse {
         // A low dragged past high would be an empty band that silently
         // rejects everything.
         a.steady_state_band = low..=high.max(low);
+
+        // Said on screen rather than only in the tooltip: past the cap the
+        // analyser trims nothing, and a knob that reads 2 s while the whole
+        // log is being analysed is a lie.
+        if over_cap {
+            ui.label(
+                RichText::new(format!(
+                    "log too short to spare {:.1} s each end — analysed whole",
+                    self.analyzer.trim_s
+                ))
+                .weak(),
+            );
+        }
 
         if ui.button("reset to defaults").clicked() {
             self.analyzer = d;
