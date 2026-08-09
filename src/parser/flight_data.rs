@@ -172,6 +172,13 @@ impl FlightData {
         &self.time_us
     }
 
+    /// The time axis by handle. A cache keyed on this can tell one log from
+    /// another with `Arc::ptr_eq`, which an index into a store that
+    /// reallocates cannot.
+    pub fn time_handle(&self) -> Arc<Vec<u64>> {
+        self.time_us.clone()
+    }
+
     /// Flight-controller uptime at the first sample — logs never start at zero,
     /// so every time axis is drawn relative to this.
     pub fn start_us(&self) -> u64 {

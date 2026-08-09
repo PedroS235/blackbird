@@ -1,3 +1,4 @@
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use crate::parser::{Axis, FlightData, PerAxis};
@@ -10,12 +11,14 @@ use crate::signal::deconv::WienerDeconvolver;
 ///
 /// Thresholds are fields so a call site can loosen them (a cinematic log moves
 /// the sticks gently) instead of them being constants buried here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StepResponseAnalyzer {
     /// Long enough to hold the low frequencies, short enough that the tune is
-    /// constant across it.
+    /// constant across it. PID-Analyzer's `framelen`.
     pub window_s: f64,
-    /// 87% overlap at the default window — a dense stack for the all-traces view.
+    /// Window/16, PID-Analyzer's `superpos` — a dense stack for the
+    /// all-traces view. Absolute rather than a fraction of the window, so the
+    /// two knobs stay independent.
     pub hop_s: f64,
     /// Regularisation, relative to the setpoint's own mean power.
     pub lambda_k: f64,
@@ -26,21 +29,23 @@ pub struct StepResponseAnalyzer {
     /// The stretch of the response averaged to find the steady state each
     /// trace is normalised against.
     pub tail_ms: f64,
-    /// A trace whose steady state is this close to zero carries no usable
-    /// gain — dividing by it would blow the curve up instead of scaling it.
-    pub min_steady_state: f64,
+    /// A craft that answered its sticks settles somewhere near its commanded
+    /// rate. A trace settling outside this band did not come from one: near
+    /// zero it carries no gain to normalise by, high it is a deconvolution
+    /// blow-up, negative it is upside down and would subtract from the mean.
+    pub steady_state_band: RangeInclusive<f64>,
 }
 
 impl Default for StepResponseAnalyzer {
     fn default() -> Self {
         Self {
-            window_s: 2.0,
-            hop_s: 0.25,
+            window_s: 1.0,
+            hop_s: 1.0 / 16.0,
             lambda_k: 0.01,
-            min_setpoint_dps: 20.0,
+            min_setpoint_dps: 52.0,
             response_ms: 500.0,
             tail_ms: 100.0,
-            min_steady_state: 1e-3,
+            steady_state_band: 0.5..=3.0,
         }
     }
 }
@@ -60,7 +65,7 @@ pub struct AxisStepResponse {
 /// a field they never enabled, a flight that never asked the craft a question,
 /// a craft that never answered — so the analyser names the cause rather than
 /// leaving the panel to guess it back out of the flight data.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NoStepResponse {
     SetpointNotLogged,
     GyroNotLogged,
@@ -70,9 +75,11 @@ pub enum NoStepResponse {
     SticksTooStill {
         min_setpoint_dps: f64,
     },
-    /// The sticks moved but every response settled at ~0 — nothing to
-    /// normalise against, so nothing that can be plotted.
-    NoSteadyState,
+    /// The sticks moved but no response settled inside the acceptance band,
+    /// which this carries so the panel can say what it was.
+    NoSteadyState {
+        band: RangeInclusive<f64>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +97,7 @@ impl Default for StepResponseAnalysis {
 
 impl StepResponseAnalysis {
     pub fn axis(&self, axis: Axis) -> Result<&AxisStepResponse, NoStepResponse> {
-        self.axes[axis].as_ref().map_err(|&reason| reason)
+        self.axes[axis].as_ref().map_err(Clone::clone)
     }
 }
 
@@ -104,7 +111,26 @@ struct Plan {
     len: usize,
     /// Samples averaged at the end of that region to find the steady state.
     tail: usize,
+    /// Hann taper, one per window sample. A window is a slice out of
+    /// continuous flight: handed to the FFT as a rectangle, both of its edges
+    /// are step discontinuities the craft never flew, and their leakage lands
+    /// in the recovered impulse response as a spike at `t = 0` that the
+    /// cumulative sum turns into a head start. PIDToolbox and PID-Analyzer
+    /// both taper first; λ does not absorb this.
+    hann: Vec<f64>,
     deconvolver: WienerDeconvolver,
+}
+
+/// Symmetric Hann taper, matching `np.hanning` — zero at both ends, so the
+/// segment's edges carry no discontinuity into the transform.
+fn hann(len: usize) -> Vec<f64> {
+    let last = len.saturating_sub(1) as f64;
+    (0..len)
+        .map(|i| match last {
+            0.0 => 1.0,
+            last => 0.5 * (1.0 - (std::f64::consts::TAU * i as f64 / last).cos()),
+        })
+        .collect()
 }
 
 impl StepResponseAnalyzer {
@@ -136,6 +162,7 @@ impl StepResponseAnalyzer {
             fs,
             hop: samples(self.hop_s).max(1),
             tail: samples(self.tail_ms / 1e3).clamp(1, len),
+            hann: hann(window),
             deconvolver: WienerDeconvolver::new(window, self.lambda_k),
             window,
             len,
@@ -158,6 +185,11 @@ impl StepResponseAnalyzer {
         // the panel shows: a still flight reads nothing like a dead gyro.
         let mut sticks_moved = false;
 
+        // Scratch for the tapered signals, reused across every window — a long
+        // log at 8 kHz is thousands of windows per axis and these would
+        // otherwise be thousands of window-sized allocations.
+        let (mut sp_w, mut gyro_w) = (vec![0.0; plan.window], vec![0.0; plan.window]);
+
         let traces: Vec<Vec<f64>> = (0..=last_start)
             .step_by(plan.hop)
             .filter_map(|start| {
@@ -167,11 +199,21 @@ impl StepResponseAnalyzer {
                 }
                 sticks_moved = true;
 
+                // Tapered before the transform, both signals the same way, so
+                // the recovered response is of the craft and not of the cut.
+                let taper = |out: &mut [f64], signal: &[f64]| {
+                    for ((o, v), w) in out.iter_mut().zip(signal).zip(&plan.hann) {
+                        *o = v * w;
+                    }
+                };
+                taper(&mut sp_w, sp);
+                taper(&mut gyro_w, &gyro[start..start + plan.window]);
+
                 // The step response is the cumulative sum of the impulse
                 // response, truncated to the region the panel draws.
                 let mut step: Vec<f64> = plan
                     .deconvolver
-                    .impulse_response(sp, &gyro[start..start + plan.window])
+                    .impulse_response(&sp_w, &gyro_w)
                     .iter()
                     .scan(0.0, |acc, &h| {
                         *acc += h;
@@ -183,7 +225,7 @@ impl StepResponseAnalyzer {
                 // Per-trace normalisation: without it a single drifting trace
                 // shifts the mean and overshoot stops meaning anything.
                 let steady = step[plan.len - plan.tail..].iter().sum::<f64>() / plan.tail as f64;
-                if steady.abs() < self.min_steady_state {
+                if !self.steady_state_band.contains(&steady) {
                     return None;
                 }
                 step.iter_mut().for_each(|v| *v /= steady);
@@ -193,7 +235,9 @@ impl StepResponseAnalyzer {
 
         if traces.is_empty() {
             return Err(match sticks_moved {
-                true => NoStepResponse::NoSteadyState,
+                true => NoStepResponse::NoSteadyState {
+                    band: self.steady_state_band.clone(),
+                },
                 false => NoStepResponse::SticksTooStill {
                     min_setpoint_dps: self.min_setpoint_dps,
                 },
@@ -258,6 +302,16 @@ mod test {
             .collect()
     }
 
+    /// When a curve first reaches `level`, in ms — the whole length if never.
+    fn crossing_ms(values: &[f64], level: f64) -> f64 {
+        values
+            .iter()
+            .position(|&v| v >= level)
+            .unwrap_or(values.len()) as f64
+            * 1e3
+            / FS
+    }
+
     fn log_with(setpoint: Vec<f64>, gyro: Vec<f64>) -> FlightData {
         let dt_us = (1e6 / FS) as u64;
         FlightData::default()
@@ -308,7 +362,94 @@ mod test {
         assert_eq!(
             analysis.axis(Axis::Roll).unwrap_err(),
             NoStepResponse::SticksTooStill {
-                min_setpoint_dps: 20.0
+                min_setpoint_dps: 52.0
+            }
+        );
+    }
+
+    /// A quad is not already a quarter of the way to its commanded rate the
+    /// instant the stick moves. A curve that leaves the origin is the
+    /// signature of untapered window edges leaking into `t = 0`.
+    #[test]
+    fn the_response_starts_near_zero_rather_than_leaping_off_the_origin() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, 20.0, 0.4);
+
+        let roll = StepResponseAnalyzer::default()
+            .analyze(&log_with(setpoint, gyro))
+            .axis(Axis::Roll)
+            .cloned()
+            .expect("roll analysed");
+
+        assert!(
+            roll.mean[0].abs() < 0.05,
+            "expected the curve to start at rest, got {:.3}",
+            roll.mean[0]
+        );
+    }
+
+    /// The same artefact read as a tune: a craft whose rise takes tens of
+    /// milliseconds must not be drawn as if it got there sooner, because that
+    /// is the reading a pilot uses to decide P against D.
+    #[test]
+    fn a_known_rise_is_not_reported_as_arriving_sooner_than_it_did() {
+        let (freq_hz, damping) = (20.0, 0.4);
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, freq_hz, damping);
+
+        let roll = StepResponseAnalyzer::default()
+            .analyze(&log_with(setpoint, gyro))
+            .axis(Axis::Roll)
+            .cloned()
+            .expect("roll analysed");
+
+        // Ground truth: drive the same system with an actual step.
+        let truth = crossing_ms(&second_order(&vec![1.0; 2_000], freq_hz, damping), 0.5);
+        let measured = crossing_ms(&roll.mean, 0.5);
+
+        assert!(
+            measured > 0.7 * truth,
+            "system reaches half in {truth:.1} ms, curve claims {measured:.1} ms"
+        );
+    }
+
+    /// The band is what keeps a deconvolution that went nowhere plausible out
+    /// of the mean: pushed somewhere this system cannot land, nothing survives.
+    #[test]
+    fn a_trace_settling_outside_the_band_does_not_reach_the_mean() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, 20.0, 0.4);
+        let band = 5.0..=10.0;
+
+        let analysis = StepResponseAnalyzer {
+            steady_state_band: band.clone(),
+            ..Default::default()
+        }
+        .analyze(&log_with(setpoint, gyro));
+
+        assert_eq!(
+            analysis.axis(Axis::Roll).unwrap_err(),
+            NoStepResponse::NoSteadyState { band }
+        );
+    }
+
+    /// A gyro answering the sticks backwards settles negative. Normalising by
+    /// that steady state would flip the trace upright and average it in as if
+    /// the craft had responded correctly.
+    #[test]
+    fn an_inverted_response_never_appears_the_right_way_up() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro: Vec<f64> = second_order(&setpoint, 20.0, 0.4)
+            .iter()
+            .map(|v| -v)
+            .collect();
+
+        let analysis = StepResponseAnalyzer::default().analyze(&log_with(setpoint, gyro));
+
+        assert_eq!(
+            analysis.axis(Axis::Roll).unwrap_err(),
+            NoStepResponse::NoSteadyState {
+                band: StepResponseAnalyzer::default().steady_state_band
             }
         );
     }
@@ -344,8 +485,8 @@ mod test {
         );
     }
 
-    /// A gyro that never responded leaves a steady state of ~0 to divide by —
-    /// which is a different story from sticks that never moved.
+    /// A gyro that never responded leaves a steady state of ~0, well below the
+    /// band — a different story from sticks that never moved.
     #[test]
     fn a_dead_gyro_is_reported_as_such_not_as_infinities() {
         let setpoint = stick_input(24_000, 200.0);
@@ -354,7 +495,9 @@ mod test {
 
         assert_eq!(
             analysis.axis(Axis::Roll).unwrap_err(),
-            NoStepResponse::NoSteadyState
+            NoStepResponse::NoSteadyState {
+                band: StepResponseAnalyzer::default().steady_state_band
+            }
         );
     }
 
@@ -375,6 +518,34 @@ mod test {
         assert!(
             StepResponseAnalyzer {
                 min_setpoint_dps: 1.0,
+                ..Default::default()
+            }
+            .analyze(&log)
+            .axis(Axis::Roll)
+            .is_ok()
+        );
+    }
+
+    /// So is the band: a craft whose response settles well above it is
+    /// rejected by default and recovered by widening the band.
+    #[test]
+    fn the_steady_state_band_is_tunable() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro: Vec<f64> = second_order(&setpoint, 20.0, 0.4)
+            .iter()
+            .map(|v| v * 5.0)
+            .collect();
+        let log = log_with(setpoint, gyro);
+
+        assert!(
+            StepResponseAnalyzer::default()
+                .analyze(&log)
+                .axis(Axis::Roll)
+                .is_err()
+        );
+        assert!(
+            StepResponseAnalyzer {
+                steady_state_band: 0.5..=10.0,
                 ..Default::default()
             }
             .analyze(&log)

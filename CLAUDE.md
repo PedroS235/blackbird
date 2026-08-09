@@ -180,14 +180,26 @@ isolated, sustained stick steps, so a detector finds nothing or averages a
 handful of unrepresentative events. Deconvolution uses every part of the flight
 where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer.
 
-- Per overlapping window (2 s, hopping 0.25 s): FFT the setpoint and the gyro,
-  zero-padded so the convolution is linear rather than circular
+- Per overlapping window (1 s, hopping window/16 = 62.5 ms): multiply both
+  signals by a **Hann window**, then FFT the setpoint and the gyro, zero-padded
+  so the convolution is linear rather than circular
+- The Hann window is not optional. A window is a slice of continuous flight;
+  handed to the FFT as a rectangle, its edges are step discontinuities the craft
+  never flew, and their leakage lands at `t = 0` as a spike that the cumulative
+  sum turns into a head start. λ does not absorb this — PIDToolbox and
+  PID-Analyzer both taper first
 - `H = (G · conj(S)) / (|S|² + λ)`, `λ = 0.01 · mean(|S|²)` — λ regularises the
   frequencies where the setpoint carried no energy
 - IFFT → impulse response; cumulative sum → step response; truncate to 500 ms
 - Normalise each trace by the mean of its last 100 ms, so one drifting trace
   cannot shift the average
-- Reject windows where `max |setpoint| < 20 deg/s`; no throttle gating
+- Reject a trace whose steady state falls outside `0.5..=3.0` — including any
+  negative one, which would otherwise be flipped upright into the mean
+- Reject windows where `max |setpoint| < 52 deg/s`; no throttle gating
+- Defaults match PID-Analyzer (`framelen = 1.0`, `superpos = 16`,
+  `np.hanning`). The panel exposes window, hop, minimum stick input, λ, the two
+  ends of the band and response length as knobs (`tail_ms` stays a field);
+  load-time analysis always uses the defaults
 - Input: `setpoint` (logged field only — reconstructing it from `rcCommand`
   needs rates the metadata does not carry) and `gyroADC` (filtered), which is
   what the PID loop saw, so filter delay belongs in the measured response

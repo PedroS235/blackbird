@@ -160,8 +160,9 @@ mod test {
         let pole = 0.95;
         // The lag's tail outlives the excitation, so the input goes quiet
         // early and the whole response fits inside the window. A real window
-        // is a slice of continuous flight and does not have that luxury —
-        // that truncation is part of what λ absorbs.
+        // is a slice of continuous flight and does not have that luxury: its
+        // edges are discontinuities, which λ does not absorb — the caller
+        // tapers them off with a Hann window before calling in.
         let mut input = noise(LEN);
         input[LEN - 200..].fill(0.0);
         let output = first_order_lag(&input, pole);

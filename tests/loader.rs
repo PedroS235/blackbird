@@ -173,7 +173,7 @@ fn multi_log_file_reports_each_sublog() {
 }
 
 /// The hover fixture logs `setpoint`, but the pilot is holding position — no
-/// window clears the 20 deg/s stick mask, so every axis is legitimately empty.
+/// window clears the 52 deg/s stick mask, so every axis is legitimately empty.
 #[test]
 fn a_hover_moves_the_sticks_too_little_for_a_step_response() {
     let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
@@ -182,7 +182,7 @@ fn a_hover_moves_the_sticks_too_little_for_a_step_response() {
     assert!(Axis::ALL.iter().all(|&axis| {
         step.axis(axis).unwrap_err()
             == NoStepResponse::SticksTooStill {
-                min_setpoint_dps: 20.0,
+                min_setpoint_dps: 52.0,
             }
     }));
 }
@@ -204,4 +204,25 @@ fn dropping_the_stick_mask_recovers_traces_from_the_hover() {
     assert_eq!(roll.mean.len(), roll.time_ms.len());
     assert!(roll.mean.iter().all(|v| v.is_finite()));
     assert!(roll.traces.iter().all(|t| t.len() == roll.mean.len()));
+}
+
+/// The bug this whole pass exists to kill, guarded on real flight rather than
+/// a synthetic: a curve that leaves the origin already part-way to the
+/// commanded rate is reading a windowing artefact as a fast craft.
+#[test]
+fn responses_from_a_real_flight_start_from_rest() {
+    let loaded = ready(load(&LogLoader::default(), "eight_logs_in_one.bbl"));
+
+    let starts: Vec<f64> = loaded
+        .analysis
+        .iter()
+        .flat_map(|a| Axis::ALL.iter().filter_map(|&axis| a.step.axis(axis).ok()))
+        .map(|response| response.mean[0])
+        .collect();
+
+    assert!(!starts.is_empty(), "no axis of the fixture was analysed");
+    assert!(
+        starts.iter().all(|v| v.abs() < 0.1),
+        "curves start at {starts:?}"
+    );
 }
