@@ -27,6 +27,7 @@ pub struct BlackbirdApp {
     notifications: VecDeque<Notification>,
     load_state: LoadState,
     tabs: Tabs,
+    theme_preference: egui::ThemePreference,
 }
 
 impl Default for BlackbirdApp {
@@ -37,12 +38,15 @@ impl Default for BlackbirdApp {
             notifications: Default::default(),
             load_state: LoadState::Idle,
             tabs: Tabs::default(),
+            theme_preference: Default::default(),
         }
     }
 }
 
 impl App for BlackbirdApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.ctx().set_theme(self.theme_preference);
+        theme::apply(ui.ctx(), ui.ctx().theme() == egui::Theme::Dark);
         self.poll_load(ui.ctx());
         self.show_loading_modal(ui.ctx());
 

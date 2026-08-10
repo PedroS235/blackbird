@@ -2,7 +2,20 @@ use egui::{FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 
 pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
-    elegance::Theme::charcoal().install(ctx);
+}
+
+/// Installs the elegance palette matching `dark` — charcoal/paper are the
+/// crate's own dark/light pair, kept pixel-identical apart from luminance.
+/// Called every frame: `Theme::install` is a no-op once the palette already
+/// matches, and the app's resolved light/dark state can change at any time
+/// (system theme switch, or the sidepanel toggle).
+pub fn apply(ctx: &egui::Context, dark: bool) {
+    if dark {
+        elegance::Theme::charcoal()
+    } else {
+        elegance::Theme::paper()
+    }
+    .install(ctx);
 
     // elegance sets text styles to plain Proportional; re-point Heading and
     // Button at the heavier Inter weights we loaded above.

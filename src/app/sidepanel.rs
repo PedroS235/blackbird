@@ -1,5 +1,5 @@
-use egui::{Color32, FontId, Layout, RichText, Vec2, vec2};
-use elegance::Button;
+use egui::Vec2;
+use elegance::{Button, Segment, SegmentedControl, SegmentedSize};
 
 use super::{BlackbirdApp, ui};
 
@@ -19,15 +19,56 @@ impl BlackbirdApp {
                 ui.vertical(|ui| {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Image::new(egui::include_image!(
-                                "../../assets/blackbird_banner.png"
-                            ))
-                            .fit_to_exact_size(Vec2::new(300.0, 100.0)),
-                        );
+                        if ui.style().visuals.dark_mode {
+                            ui.add(
+                                egui::Image::new(egui::include_image!(
+                                    "../../assets/blackbird_banner.png"
+                                ))
+                                .fit_to_exact_size(Vec2::new(300.0, 100.0)),
+                            );
+                        } else {
+                            ui.add(
+                                egui::Image::new(egui::include_image!(
+                                    "../../assets/blackbird_banner_light.png"
+                                ))
+                                .fit_to_exact_size(Vec2::new(300.0, 100.0)),
+                            );
+                        }
                     });
 
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
+                    egui::containers::Sides::new().shrink_left().show(
+                        ui,
+                        |_ui| {},
+                        |ui| {
+                            let mut selected = match self.theme_preference {
+                                egui::ThemePreference::Dark => 0,
+                                egui::ThemePreference::Light => 1,
+                                egui::ThemePreference::System => 2,
+                            };
+                            ui.add(
+                                SegmentedControl::from_segments(
+                                    &mut selected,
+                                    [
+                                        Segment::icon(egui_phosphor::regular::MOON)
+                                            .hover_text("Dark theme"),
+                                        Segment::icon(egui_phosphor::regular::SUN)
+                                            .hover_text("Light theme"),
+                                        Segment::icon(egui_phosphor::regular::DESKTOP)
+                                            .hover_text("Follow system theme"),
+                                    ],
+                                )
+                                .size(SegmentedSize::Small),
+                            );
+                            self.theme_preference = match selected {
+                                0 => egui::ThemePreference::Dark,
+                                1 => egui::ThemePreference::Light,
+                                _ => egui::ThemePreference::System,
+                            };
+                        },
+                    );
+
+                    ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(8.0);
 
