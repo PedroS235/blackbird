@@ -1,4 +1,8 @@
-## [unreleased]
+## [0.5.0] - 2026-08-10
+
+### 🚀 Features
+
+- *(ci)* Build blackbird for arm64 architecture
 
 ### 🐛 Bug Fixes
 
@@ -7,6 +11,10 @@
 ### 📚 Documentation
 
 - Add README and MIT license
+
+### ⚙️ Miscellaneous Tasks
+
+- Generate changelog using cliff
 ## [0.4.0] - 2026-08-09
 
 ### 🚀 Features
