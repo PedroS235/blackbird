@@ -53,14 +53,16 @@ jobs:
           path: artifacts
 
       - name: Rename artifacts
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          mv artifacts/blackbird-x86_64-unknown-linux-gnu/blackbird   artifacts/blackbird-linux-x86_64
-          mv artifacts/blackbird-x86_64-apple-darwin/blackbird         artifacts/blackbird-macos-x86_64
-          mv artifacts/blackbird-x86_64-pc-windows-msvc/blackbird.exe  artifacts/blackbird-windows-x86_64.exe
+          mv artifacts/blackbird-x86_64-unknown-linux-gnu/blackbird   artifacts/blackbird-${VERSION}-linux-x86_64
+          mv artifacts/blackbird-x86_64-apple-darwin/blackbird         artifacts/blackbird-${VERSION}-macos-x86_64
+          mv artifacts/blackbird-x86_64-pc-windows-msvc/blackbird.exe  artifacts/blackbird-${VERSION}-windows-x86_64.exe
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/blackbird-linux-x86_64
-            artifacts/blackbird-macos-x86_64
-            artifacts/blackbird-windows-x86_64.exe
+            artifacts/blackbird-${{ github.ref_name }}-linux-x86_64
+            artifacts/blackbird-${{ github.ref_name }}-macos-x86_64
+            artifacts/blackbird-${{ github.ref_name }}-windows-x86_64.exe
