@@ -71,7 +71,7 @@ pub fn show(
             // instead of pushing the panel wider.
             ui.horizontal_wrapped(|ui| {
                 for i in 0..sublog_count {
-                    let button = if *active_sublog == i {
+                    let button = if *active_sublog == i && is_selected {
                         Button::new((i + 1).to_string())
                     } else {
                         Button::new((i + 1).to_string()).outline()
