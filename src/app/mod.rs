@@ -32,6 +32,7 @@ pub struct BlackbirdApp {
 
 impl Default for BlackbirdApp {
     fn default() -> Self {
+        tracing::info!("Blackbird app started");
         Self {
             app_name: "Blackbird",
             logs: Default::default(),
@@ -166,6 +167,10 @@ impl BlackbirdApp {
         else {
             return;
         };
+
+        for path in paths.iter() {
+            tracing::info!("Loading {}", path.to_string_lossy());
+        }
 
         self.load_state = LoadState::Loading {
             handle: LogLoader::default().spawn(paths),
