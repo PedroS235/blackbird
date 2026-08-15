@@ -48,13 +48,13 @@ impl Default for StepResponseAnalyzer {
     fn default() -> Self {
         Self {
             window_s: 1.0,
-            hop_s: 1.0 / 16.0,
-            lambda_k: 0.01,
+            hop_s: 1.0 / 10.0,
+            lambda_k: 0.0001,
             min_setpoint_dps: 52.0,
             trim_s: super::DEFAULT_TRIM_S,
             response_ms: 500.0,
             tail_ms: 100.0,
-            steady_state_band: 0.5..=3.0,
+            steady_state_band: 0.5..=2.0,
             max_traces: 200,
         }
     }
