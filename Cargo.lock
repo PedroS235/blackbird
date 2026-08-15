@@ -484,7 +484,7 @@ dependencies = [
 [[package]]
 name = "blackbox-log"
 version = "0.4.3"
-source = "git+https://github.com/PedroS235/blackbox-log.git#0a91b84f9b5d1534dff3f875c77080dd11173e61"
+source = "git+https://github.com/PedroS235/blackbox-log.git?tag=v0.5.0#c30479d29063486ec4f34632f9b43f9c759a89fe"
 dependencies = [
  "bitvec",
  "hashbrown 0.15.5",
