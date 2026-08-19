@@ -38,9 +38,10 @@ pub struct StepResponseAnalyzer {
     /// blow-up, negative it is upside down and would subtract from the mean.
     pub steady_state_band: RangeInclusive<f64>,
     /// How many traces are kept for the band the panel draws. A field rather
-    /// than a knob: past a hundred traces the band is pixel-for-pixel the same
-    /// and this changes only memory, never the answer — the mean is always
-    /// accumulated over every window.
+    /// than a knob: forty traces already read as a band and this changes only
+    /// memory, never the answer — the mean is always accumulated over every
+    /// window. It is not free either: each trace is `response_ms` of `f64`, at
+    /// load time, for every sublog of every open file.
     pub max_traces: usize,
 }
 
@@ -55,7 +56,7 @@ impl Default for StepResponseAnalyzer {
             response_ms: 500.0,
             tail_ms: 100.0,
             steady_state_band: 0.5..=2.0,
-            max_traces: 200,
+            max_traces: 40,
         }
     }
 }
@@ -233,6 +234,14 @@ impl Default for StepResponseAnalysis {
 }
 
 impl StepResponseAnalysis {
+    /// Assembled from per-axis results. `pub` rather than `pub(crate)` because
+    /// the UI is a separate binary crate: it is how a panel test stands up a
+    /// comparison whose flights failed on different axes without deconvolving a
+    /// synthetic log per flight.
+    pub fn from_axes(axes: PerAxis<Result<AxisStepResponse, NoStepResponse>>) -> Self {
+        Self { axes }
+    }
+
     pub fn axis(&self, axis: Axis) -> Result<&AxisStepResponse, NoStepResponse> {
         self.axes[axis].as_ref().map_err(Clone::clone)
     }
@@ -637,6 +646,33 @@ mod test {
         assert_eq!(tight.mean, huge.mean);
         assert_eq!(tight.count, huge.count);
         assert_eq!(tight.metrics, huge.metrics);
+    }
+
+    /// The retained sample went from 200 traces to 40 to stop a twelve-sublog
+    /// file parking hundreds of megabytes behind a checkbox that is now off.
+    /// Nothing a pilot reads may have moved with it.
+    #[test]
+    fn the_smaller_retained_sample_measures_the_same_flight() {
+        let setpoint = stick_input(24_000, 200.0);
+        let gyro = second_order(&setpoint, 20.0, 0.4);
+        let log = log_with(setpoint, gyro);
+
+        let analysed = |max_traces| {
+            StepResponseAnalyzer {
+                max_traces,
+                ..Default::default()
+            }
+            .analyze(&log)
+            .axis(Axis::Roll)
+            .cloned()
+            .expect("roll analysed")
+        };
+
+        let (now, before) = (analysed(40), analysed(200));
+
+        assert_eq!(now.mean, before.mean);
+        assert_eq!(now.count, before.count);
+        assert_eq!(now.metrics, before.metrics);
     }
 
     /// What the panel prints is how much flight the curve came from, not how

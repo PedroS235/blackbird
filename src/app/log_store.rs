@@ -2,23 +2,59 @@ use std::collections::HashMap;
 
 use crate::analysis::Analysis;
 use crate::loader;
-use crate::parser::ParsedLog;
+use crate::parser::{FlightData, Metadata, ParsedLog};
+
+/// A loaded file's identity, minted in [`LogStore::push`] and never reused.
+///
+/// Panel state names flights by id rather than by index: `remove` shifts every
+/// later index down, so an index held outside the store resolves to a
+/// *different* file afterwards and keeps being drawn under the old label. An id
+/// of a removed file resolves to `None` for good, which is the failure mode a
+/// compare set can survive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct LogId(u64);
+
+impl LogId {
+    /// Ids are minted by the store; this is for the tests that need a handful
+    /// of distinct ones without standing one up.
+    #[cfg(test)]
+    pub(super) fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+/// One flight: which file it came from, and which sublog inside it.
+pub(super) type FlightKey = (LogId, usize);
+
+/// One flight's data, resolved out of the store — the same three borrows a tab
+/// is handed for its own flight.
+pub(super) struct FlightRef<'a> {
+    pub(super) flight: &'a FlightData,
+    pub(super) analysis: &'a Analysis,
+    pub(super) metadata: &'a Metadata,
+}
+
+/// Read-only view of every loaded flight, for the panels that draw more than
+/// their own. Deliberately not `&LogStore`: `select` and `remove` have to stay
+/// out of a panel's reach, since the sidepanel iterates the store mutably in
+/// the same frame.
+pub(super) trait FlightCatalog {
+    /// Every loaded flight, in file order then sublog order.
+    fn flights(&self) -> Vec<FlightKey>;
+    /// The sidepanel's selection — the base flight of any comparison.
+    fn selected(&self) -> Option<FlightKey>;
+    fn resolve(&self, key: FlightKey) -> Option<FlightRef<'_>>;
+    /// File name and sublog number, the way a chip or a menu entry says it.
+    fn label(&self, key: FlightKey) -> Option<String>;
+}
 
 pub(super) struct LoadedLog {
+    /// Assigned by [`LogStore::push`], the only place ids are minted.
+    id: LogId,
     pub(super) log: Vec<ParsedLog>,
     /// One `Analysis` per sublog in `log`, computed once at load time.
     pub(super) analysis: Vec<Analysis>,
     pub(super) active_sublog: usize,
-}
-
-impl From<loader::LoadedLog> for LoadedLog {
-    fn from(loaded: loader::LoadedLog) -> Self {
-        Self {
-            log: loaded.logs,
-            analysis: loaded.analysis,
-            active_sublog: 0,
-        }
-    }
 }
 
 pub(super) enum LoadState {
@@ -53,13 +89,24 @@ impl LoadState {
 pub(super) struct LogStore {
     logs: Vec<LoadedLog>,
     selected: Option<usize>,
+    /// Monotonic, never rewound on removal — index reuse is what ids exist to
+    /// avoid.
+    next_id: u64,
 }
 
 impl LogStore {
     /// Auto-selects only when this is the first log ever loaded — later
     /// loads never steal focus from what the user is already looking at.
-    pub(super) fn push(&mut self, log: LoadedLog) {
-        self.logs.push(log);
+    pub(super) fn push(&mut self, loaded: loader::LoadedLog) {
+        let id = LogId(self.next_id);
+        self.next_id += 1;
+
+        self.logs.push(LoadedLog {
+            id,
+            log: loaded.logs,
+            analysis: loaded.analysis,
+            active_sublog: 0,
+        });
         if self.selected.is_none() {
             self.selected = Some(self.logs.len() - 1);
         }
@@ -68,12 +115,6 @@ impl LogStore {
     pub(super) fn select(&mut self, index: usize) {
         debug_assert!(index < self.logs.len());
         self.selected = Some(index);
-    }
-
-    pub(super) fn current_flight(&self) -> Option<(&ParsedLog, &Analysis)> {
-        let loaded = self.logs.get(self.selected?)?;
-        let idx = loaded.active_sublog;
-        Some((loaded.log.get(idx)?, loaded.analysis.get(idx)?))
     }
 
     pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut LoadedLog, bool)> {
@@ -92,10 +133,49 @@ impl LogStore {
         debug_assert!(index < self.logs.len());
         self.logs.remove(index);
         self.selected = match self.selected {
-            Some(sel) if sel == index => (!self.logs.is_empty()).then_some(sel.min(self.logs.len() - 1)),
+            Some(sel) if sel == index => {
+                (!self.logs.is_empty()).then_some(sel.min(self.logs.len() - 1))
+            }
             Some(sel) if sel > index => Some(sel - 1),
             sel => sel,
         };
+    }
+
+    fn find(&self, id: LogId) -> Option<&LoadedLog> {
+        self.logs.iter().find(|loaded| loaded.id == id)
+    }
+}
+
+impl FlightCatalog for LogStore {
+    fn flights(&self) -> Vec<FlightKey> {
+        self.logs
+            .iter()
+            .flat_map(|loaded| (0..loaded.log.len()).map(move |i| (loaded.id, i)))
+            .collect()
+    }
+
+    fn selected(&self) -> Option<FlightKey> {
+        let loaded = self.logs.get(self.selected?)?;
+        Some((loaded.id, loaded.active_sublog))
+    }
+
+    fn resolve(&self, (id, sublog): FlightKey) -> Option<FlightRef<'_>> {
+        let loaded = self.find(id)?;
+        let parsed = loaded.log.get(sublog)?;
+        Some(FlightRef {
+            flight: &parsed.flight_data,
+            analysis: loaded.analysis.get(sublog)?,
+            metadata: &parsed.metadata,
+        })
+    }
+
+    fn label(&self, (id, sublog): FlightKey) -> Option<String> {
+        let loaded = self.find(id)?;
+        let name = loaded.log.get(sublog)?.metadata.file_name.clone();
+        Some(match loaded.log.len() {
+            1 => name,
+            count => format!("{name} · log {}/{count}", sublog + 1),
+        })
     }
 }
 
@@ -103,12 +183,31 @@ impl LogStore {
 mod test {
     use super::*;
 
-    fn loaded_log() -> LoadedLog {
-        LoadedLog {
-            log: vec![ParsedLog::default()],
-            analysis: vec![Analysis::default()],
-            active_sublog: 0,
+    /// One file, named, with `sublogs` sublogs — the name is what a resolved
+    /// flight is recognised by.
+    fn file(name: &str, sublogs: usize) -> loader::LoadedLog {
+        loader::LoadedLog {
+            file_name: name.to_string(),
+            logs: (0..sublogs)
+                .map(|i| ParsedLog {
+                    metadata: Metadata {
+                        file_name: name.to_string(),
+                        ..Default::default()
+                    },
+                    log_index: i,
+                    ..Default::default()
+                })
+                .collect(),
+            analysis: (0..sublogs).map(|_| Analysis::default()).collect(),
         }
+    }
+
+    fn loaded_log() -> loader::LoadedLog {
+        file("log.bbl", 1)
+    }
+
+    fn ids(store: &LogStore) -> Vec<LogId> {
+        store.logs.iter().map(|loaded| loaded.id).collect()
     }
 
     #[test]
@@ -137,16 +236,18 @@ mod test {
     }
 
     #[test]
-    fn current_flight_none_when_empty() {
+    fn nothing_resolves_when_empty() {
         let store = LogStore::default();
-        assert!(store.current_flight().is_none());
+        assert!(store.selected().is_none());
+        assert!(store.flights().is_empty());
     }
 
     #[test]
-    fn current_flight_some_when_selected() {
+    fn the_selected_flight_resolves() {
         let mut store = LogStore::default();
         store.push(loaded_log());
-        assert!(store.current_flight().is_some());
+        let key = store.selected().expect("a log is selected");
+        assert!(store.resolve(key).is_some());
     }
 
     #[test]
@@ -154,5 +255,87 @@ mod test {
     fn select_out_of_range_panics() {
         let mut store = LogStore::default();
         store.select(0);
+    }
+
+    /// Ids are minted, not derived from a position, so a removal cannot hand a
+    /// later log an id an earlier one already used.
+    #[test]
+    fn ids_are_never_reused() {
+        let mut store = LogStore::default();
+        for name in ["a", "b", "c"] {
+            store.push(file(name, 1));
+        }
+        let before = ids(&store);
+
+        store.remove(0);
+        store.push(file("d", 1));
+
+        let fresh = *ids(&store).last().expect("just pushed");
+        assert!(
+            !before.contains(&fresh),
+            "{fresh:?} was already handed out: {before:?}"
+        );
+    }
+
+    /// The load-bearing one: this is exactly what an index-keyed compare set
+    /// gets wrong. The removed flight is gone, and the flights that shifted
+    /// down are still the same flights under the same ids.
+    #[test]
+    fn a_removal_does_not_move_the_flights_that_outlived_it() {
+        let mut store = LogStore::default();
+        for name in ["a", "b", "c"] {
+            store.push(file(name, 1));
+        }
+        let [a, b, c] = <[LogId; 3]>::try_from(ids(&store)).expect("three logs");
+
+        store.remove(0);
+
+        assert!(
+            store.resolve((a, 0)).is_none(),
+            "a removed log still resolves"
+        );
+        for (id, name) in [(b, "b"), (c, "c")] {
+            let resolved = store.resolve((id, 0)).expect("outlived the removal");
+            assert_eq!(resolved.metadata.file_name, name);
+        }
+    }
+
+    /// A sublog index past the end of *its own* file must not fall through to
+    /// another file's sublog.
+    #[test]
+    fn a_sublog_past_the_end_does_not_resolve() {
+        let mut store = LogStore::default();
+        store.push(file("a", 2));
+        store.push(file("b", 2));
+        let id = ids(&store)[0];
+
+        assert!(store.resolve((id, 1)).is_some());
+        assert!(store.resolve((id, 2)).is_none());
+    }
+
+    #[test]
+    fn every_sublog_of_every_file_is_offered_once() {
+        let mut store = LogStore::default();
+        store.push(file("a", 3));
+        store.push(file("b", 1));
+        let [a, b] = <[LogId; 2]>::try_from(ids(&store)).expect("two logs");
+
+        assert_eq!(store.flights(), vec![(a, 0), (a, 1), (a, 2), (b, 0)]);
+    }
+
+    /// The sublog number is only worth saying when the file has more than one.
+    #[test]
+    fn labels_name_the_file_and_the_sublog() {
+        let mut store = LogStore::default();
+        store.push(file("multi.bbl", 3));
+        store.push(file("single.bfl", 1));
+        let [multi, single] = <[LogId; 2]>::try_from(ids(&store)).expect("two logs");
+
+        assert_eq!(
+            store.label((multi, 1)).as_deref(),
+            Some("multi.bbl · log 2/3")
+        );
+        assert_eq!(store.label((single, 0)).as_deref(), Some("single.bfl"));
+        assert_eq!(store.label((single, 1)), None);
     }
 }

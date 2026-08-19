@@ -1,10 +1,11 @@
-use egui::{RichText, Ui};
+use egui::{RichText, Ui, Vec2b};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 use elegance::Slider;
 
 use super::{PEAK_MARKER_COLOR, drawn_axes};
 use crate::analysis::SpectralAnalysis;
-use crate::app::tabs::{get_axis_color, stacked_plot_height};
+use crate::app::colors;
+use crate::app::tabs::stacked_plot_height;
 use crate::parser::{Axis, PerAxis};
 
 /// Welch-averaged linear magnitude — no dB, chunked and averaged like the
@@ -35,6 +36,7 @@ impl Frequency {
         // After the slider, and over the axes that draw: measuring before the
         // slider sized the plots against height the slider then took.
         let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
+        let palette = colors::palette(ui.ctx());
 
         for axis in Axis::ALL {
             let Some(spec) = analysis.axis(axis) else {
@@ -51,6 +53,9 @@ impl Frequency {
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("magnitude")
+                .allow_zoom(Vec2b::new(true, true))
+                .allow_scroll(Vec2b::new(true, false))
+                .allow_drag(Vec2b::new(true, true))
                 .show(ui, |plot_ui| {
                     let raw_points: PlotPoints = raw_spectrum
                         .freq_hz
@@ -58,10 +63,7 @@ impl Frequency {
                         .zip(&raw_spectrum.magnitude)
                         .map(|(&f, &v)| [f, v])
                         .collect();
-                    plot_ui.line(
-                        Line::new("raw", raw_points)
-                            .color(elegance::Palette::charcoal().text_faint),
-                    );
+                    plot_ui.line(Line::new("raw", raw_points).color(palette.text_faint));
 
                     if let Some((freq, mag)) = spectrum_peak(
                         &raw_spectrum.freq_hz,
@@ -90,7 +92,8 @@ impl Frequency {
                             .map(|(&f, &v)| [f, v])
                             .collect();
                         plot_ui.line(
-                            Line::new("filtered", filtered_points).color(get_axis_color(axis)),
+                            Line::new("filtered", filtered_points)
+                                .color(colors::axis_color(&palette, axis)),
                         );
                     }
                 });

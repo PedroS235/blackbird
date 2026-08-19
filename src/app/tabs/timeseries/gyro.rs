@@ -1,6 +1,7 @@
 use egui::{RichText, Ui};
 
-use crate::app::tabs::{get_axis_color, stacked_plot_height};
+use crate::app::colors;
+use crate::app::tabs::stacked_plot_height;
 use crate::app::ui::timeseries_plot::{Series, TimeseriesPlot};
 use crate::parser::{Axis, FlightData};
 
@@ -59,6 +60,7 @@ pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
         .filter(|&&a| fd.gyro_raw(a).is_some() || fd.gyro(a).is_some())
         .count();
     let plot_height = stacked_plot_height(ui, drawn);
+    let palette = colors::palette(ui.ctx());
 
     for axis in Axis::ALL {
         let mut series = Vec::new();
@@ -66,7 +68,7 @@ pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
         if let Some(raw) = fd.gyro_raw(axis) {
             series.push(Series {
                 label: format!("{} (raw)", axis.name()),
-                color: elegance::Palette::charcoal().text_faint,
+                color: palette.text_faint,
                 time_us: fd.time_us(),
                 samples: raw,
             });
@@ -75,7 +77,7 @@ pub(super) fn show(ui: &mut Ui, fd: &FlightData) {
         if let Some(filtered) = fd.gyro(axis) {
             series.push(Series {
                 label: format!("{} (filtered)", axis.name()),
-                color: get_axis_color(axis),
+                color: colors::axis_color(&palette, axis),
                 time_us: fd.time_us(),
                 samples: filtered,
             });

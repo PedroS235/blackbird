@@ -1,9 +1,10 @@
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, RichText, Ui, Vec2b};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 
 use super::{PEAK_MARKER_COLOR, drawn_axes};
 use crate::analysis::SpectralAnalysis;
-use crate::app::tabs::{get_axis_color, stacked_plot_height};
+use crate::app::colors;
+use crate::app::tabs::stacked_plot_height;
 use crate::parser::{Axis, PerAxis};
 
 const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
@@ -19,6 +20,7 @@ pub(super) struct Psd {
 impl Psd {
     pub(super) fn show(&mut self, ui: &mut Ui, analysis: &SpectralAnalysis) {
         let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
+        let palette = colors::palette(ui.ctx());
 
         for axis in Axis::ALL {
             let Some(spec) = analysis.axis(axis) else {
@@ -34,6 +36,9 @@ impl Psd {
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("dB")
+                .allow_zoom(Vec2b::new(true, true))
+                .allow_scroll(Vec2b::new(true, false))
+                .allow_drag(Vec2b::new(true, true))
                 .show(ui, |plot_ui| {
                     let raw_points: PlotPoints = spec
                         .raw_psd
@@ -42,10 +47,7 @@ impl Psd {
                         .zip(&spec.raw_psd.power_db)
                         .map(|(&f, &v)| [f, v])
                         .collect();
-                    plot_ui.line(
-                        Line::new("raw", raw_points)
-                            .color(elegance::Palette::charcoal().text_faint),
-                    );
+                    plot_ui.line(Line::new("raw", raw_points).color(palette.text_faint));
 
                     if self.filtered_visible[axis]
                         && let Some(filtered_psd) = &spec.filtered_psd
@@ -57,7 +59,8 @@ impl Psd {
                             .map(|(&f, &v)| [f, v])
                             .collect();
                         plot_ui.line(
-                            Line::new("filtered", filtered_points).color(get_axis_color(axis)),
+                            Line::new("filtered", filtered_points)
+                                .color(colors::axis_color(&palette, axis)),
                         );
                     }
 

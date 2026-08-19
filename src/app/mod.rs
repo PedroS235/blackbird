@@ -1,3 +1,4 @@
+mod colors;
 mod log_store;
 mod notification;
 mod sidepanel;
@@ -53,7 +54,7 @@ impl App for BlackbirdApp {
 
         self.show_sidepanel(ui);
         self.show_notifications(ui);
-        self.tabs.show(ui, self.logs.current_flight());
+        self.tabs.show(ui, &self.logs);
     }
 }
 
@@ -105,7 +106,7 @@ impl BlackbirdApp {
                 }
                 Ok(LoadEvent::Ready(log)) => {
                     progress.insert(log.file_name.clone(), 1.0);
-                    self.logs.push(log.into());
+                    self.logs.push(log);
                 }
                 Ok(LoadEvent::Failed { file_name, error }) => {
                     errors.push(format!("{file_name}: {error}"))
