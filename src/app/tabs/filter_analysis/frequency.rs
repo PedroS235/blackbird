@@ -1,4 +1,4 @@
-use egui::{RichText, Ui};
+use egui::{RichText, Ui, Vec2b};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 use elegance::Slider;
 
@@ -53,6 +53,9 @@ impl Frequency {
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("magnitude")
+                .allow_zoom(Vec2b::new(true, true))
+                .allow_scroll(Vec2b::new(true, false))
+                .allow_drag(Vec2b::new(true, true))
                 .show(ui, |plot_ui| {
                     let raw_points: PlotPoints = raw_spectrum
                         .freq_hz

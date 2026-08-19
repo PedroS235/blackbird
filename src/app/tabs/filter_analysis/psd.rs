@@ -1,4 +1,4 @@
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, RichText, Ui, Vec2b};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 
 use super::{PEAK_MARKER_COLOR, drawn_axes};
@@ -36,6 +36,9 @@ impl Psd {
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("dB")
+                .allow_zoom(Vec2b::new(true, true))
+                .allow_scroll(Vec2b::new(true, false))
+                .allow_drag(Vec2b::new(true, true))
                 .show(ui, |plot_ui| {
                     let raw_points: PlotPoints = spec
                         .raw_psd

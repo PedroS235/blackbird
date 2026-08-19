@@ -1,4 +1,4 @@
-use egui::{Color32, ColorImage, TextureOptions, Vec2};
+use egui::{Color32, ColorImage, TextureOptions, Vec2, Vec2b};
 use egui_plot::{Line, Plot, PlotImage, PlotPoint, PlotPoints};
 
 use crate::signal::fft::BinnedSpectrum;
@@ -110,6 +110,9 @@ impl Heatmap<'_> {
         Plot::new(self.id.as_str())
             .height(self.height)
             .x_axis_label(x_label)
+            .allow_zoom(Vec2b::new(true, true))
+            .allow_scroll(Vec2b::new(false, false))
+            .allow_drag(Vec2b::new(true, true))
             .y_axis_label(y_label)
             .show(ui, |plot_ui| {
                 plot_ui.image(PlotImage::new(self.id.as_str(), &texture, center, size));
