@@ -1,3 +1,32 @@
+## [0.6.0] - 2026-08-19
+
+### 🚀 Features
+
+- *(step-response)* Compare up to four flights in one panel
+
+### 🐛 Bug Fixes
+
+- Use same settings throught plots
+- Add a Vertical Scrollable area
+
+### 💼 Other
+
+- Use tagged git patch of blackbox-log
+
+### 🚜 Refactor
+
+- Update deprecated function call show_inside
+
+### ⚙️ Miscellaneous Tasks
+
+- Update step-response defaults
+- Add simple logging to start of app
+## [0.5.1] - 2026-08-10
+
+### 🐛 Bug Fixes
+
+- Light-mode banner and card theming, add theme toggle (#2)
+- Only highly selected sub-log for the selected Flight Log (#1)
 ## [0.5.0] - 2026-08-10
 
 ### 🚀 Features
@@ -15,6 +44,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Generate changelog using cliff
+- Build changelog
 ## [0.4.0] - 2026-08-09
 
 ### 🚀 Features
