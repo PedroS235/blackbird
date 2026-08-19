@@ -222,10 +222,19 @@ where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer
 - Input: `setpoint` (logged field only) and `gyroADC` (filtered), which is what
   the PID loop saw, so filter delay belongs in the measured response
 - Traces are kept individually as well as averaged — the spread is diagnostic.
-  Only a bounded, evenly spread sample of them is retained (`max_traces`, 200);
-  the mean and the metrics always come from every surviving window
+  Only a bounded, evenly spread sample of them is retained (`max_traces`, 40);
+  the mean and the metrics always come from every surviving window. The band is
+  off by default: `spread_pct` is the same claim as a number, and 200 traces per
+  axis per sublog parked hundreds of megabytes behind an unticked checkbox
 - Metrics (`StepMetrics`) are measured on the mean curve, so the number and the
   drawn curve can never disagree. Below ten responses the panel says so
+- Up to four flights are compared in this panel — the sidepanel keeps single
+  selection, and comparison is a Step Response concept rather than an app-wide
+  mode. The base flight is always the sidepanel's selection and always colour
+  slot 0; colour is the slot, never the flight, and the chips carry identity.
+  Metrics are prose at one flight and a colour-swatched grid at two or more.
+  Which axes draw is the union across the compared flights, and every flight
+  that cannot fill one says why, by name
 
 ### Filter delay
 
@@ -339,6 +348,9 @@ _(none yet — project is in initial setup)_
 | `blackbox-log` wrapped in thin internal module | Crate types must not leak. If we swap the crate, only `parser/` changes |
 | `AnalysisResult` feeds both UI and AI | Single source of truth. AI reasons over computed metrics, not raw floats |
 | `PlotState` lives in `app.rs`, passed to all panels | Future panels (spectral, step response) share the same time range and cursor |
+| Flights are named by `LogId`, never by index | `LogStore::remove` shifts every later index, and panel state the store cannot see would then redraw a different file under the old label |
+| Panels reach other flights through a read-only catalog on `TabCtx` | A panel handed `&LogStore` could `select` or `remove` mid-frame while the sidepanel iterates it |
+| One colour module (`app/colors.rs`) for axes and compare slots | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
 | AI as trait with two backends | Anthropic for quality, Ollama for offline/privacy. Swappable at runtime |
 | `prompt.rs` isolated from API plumbing | Prompt is a product decision iterated independently of transport code |
 

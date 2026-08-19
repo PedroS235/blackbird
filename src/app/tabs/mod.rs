@@ -2,24 +2,15 @@ mod filter_analysis;
 mod pid_analysis;
 mod timeseries;
 
-use blackbird::parser::Axis;
-use egui::{Color32, Ui};
+use egui::Ui;
 
 use crate::analysis::Analysis;
-use crate::parser::{FlightData, Metadata, ParsedLog};
+use crate::app::log_store::{FlightCatalog, FlightKey};
+use crate::parser::{FlightData, Metadata};
 
 use filter_analysis::FilterAnalysis;
 use pid_analysis::PidAnalysis;
 use timeseries::Timeseries;
-
-pub(super) fn get_axis_color(axis: Axis) -> Color32 {
-    // TODO: retrive from current theme and not fixed pallete
-    match axis {
-        Axis::Roll => elegance::Palette::charcoal().red,
-        Axis::Pitch => elegance::Palette::charcoal().green,
-        Axis::Yaw => elegance::Palette::charcoal().blue,
-    }
-}
 
 /// What every tab is handed. Raw data only — a predicate derived from it stays
 /// with whoever reads it, so this stays the one place a new kind of shared data
@@ -28,6 +19,12 @@ pub(super) struct TabCtx<'a> {
     pub(super) flight: &'a FlightData,
     pub(super) analysis: &'a Analysis,
     pub(super) metadata: &'a Metadata,
+    /// Which flight the three borrows above are — what a panel comparing
+    /// flights calls the base, and what it excludes from its candidates.
+    pub(super) base: FlightKey,
+    /// Every other loaded flight, read-only. A panel that draws only its own
+    /// ignores this.
+    pub(super) catalog: &'a dyn FlightCatalog,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -51,7 +48,7 @@ pub(super) struct Tabs {
 impl Tabs {
     /// Resolves the selected log once so that nothing below here sees an
     /// `Option`, and no tab re-implements the empty case.
-    pub(super) fn show(&mut self, ui: &mut Ui, flight: Option<(&ParsedLog, &Analysis)>) {
+    pub(super) fn show(&mut self, ui: &mut Ui, catalog: &dyn FlightCatalog) {
         egui::CentralPanel::default().show(ui, |ui| {
             tab_bar(
                 ui,
@@ -64,14 +61,19 @@ impl Tabs {
             );
             ui.separator();
 
-            let Some((parsed, analysis)) = flight else {
+            let Some((base, flight)) = catalog
+                .selected()
+                .and_then(|base| Some((base, catalog.resolve(base)?)))
+            else {
                 ui.label("No log selected");
                 return;
             };
             let ctx = TabCtx {
-                flight: &parsed.flight_data,
-                analysis,
-                metadata: &parsed.metadata,
+                flight: flight.flight,
+                analysis: flight.analysis,
+                metadata: flight.metadata,
+                base,
+                catalog,
             };
 
             match self.selected {
