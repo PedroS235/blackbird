@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
-use egui::{Color32, DragValue, RichText, Ui};
+use egui::{Color32, DragValue, RichText, ScrollArea, Ui, Vec2b};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 use elegance::Palette;
 
@@ -175,98 +175,100 @@ impl StepResponse {
         let comparing = slots.len() > 1;
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
-            ui.add_enabled(
-                !comparing,
-                egui::Checkbox::new(&mut self.show_individual, "show individual responses"),
-            )
-            .on_hover_text(match comparing {
-                // Honest about why rather than silently ignoring the click.
-                true => "One flight at a time: several overlaid bands are mud.".to_string(),
-                false => "Draws the retained responses behind the mean, so a clean mean of \
+        ScrollArea::new(Vec2b::new(false, true)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    !comparing,
+                    egui::Checkbox::new(&mut self.show_individual, "show individual responses"),
+                )
+                .on_hover_text(match comparing {
+                    // Honest about why rather than silently ignoring the click.
+                    true => "One flight at a time: several overlaid bands are mud.".to_string(),
+                    false => "Draws the retained responses behind the mean, so a clean mean of \
                           agreement is tellable from a mean of two different flight regimes. The \
                           range printed beside the numbers is the same claim, counted rather than \
                           drawn."
-                    .to_string(),
-            });
-            ui.separator();
-
-            // Top level rather than inside the knobs: picking a discipline is
-            // a pilot-level question, where the deg/s behind it is not.
-            ui.label("stick input:");
-            for (name, dps, hint) in STICK_PRESETS {
-                let chosen = self.analyzer.min_setpoint_dps == dps;
-                if ui
-                    .selectable_label(chosen, name)
-                    .on_hover_text(format!("{hint}\n\nMinimum stick input {dps:.0} deg/s."))
-                    .clicked()
-                {
-                    self.analyzer.min_setpoint_dps = dps;
-                }
-            }
-
-            // What the presets mean depends on the craft: 120 deg/s is a flick
-            // on 1200 deg/s rates and a full flip on 400. The base flight's,
-            // since the chips carry the others' on hover and say when they
-            // differ.
-            if let Some(rates) = &ctx.metadata.rates {
+                        .to_string(),
+                });
                 ui.separator();
-                ui.label(RichText::new(rates.to_string()).weak())
+
+                // Top level rather than inside the knobs: picking a discipline is
+                // a pilot-level question, where the deg/s behind it is not.
+                ui.label("stick input:");
+                for (name, dps, hint) in STICK_PRESETS {
+                    let chosen = self.analyzer.min_setpoint_dps == dps;
+                    if ui
+                        .selectable_label(chosen, name)
+                        .on_hover_text(format!("{hint}\n\nMinimum stick input {dps:.0} deg/s."))
+                        .clicked()
+                    {
+                        self.analyzer.min_setpoint_dps = dps;
+                    }
+                }
+
+                // What the presets mean depends on the craft: 120 deg/s is a flick
+                // on 1200 deg/s rates and a full flip on 400. The base flight's,
+                // since the chips carry the others' on hover and say when they
+                // differ.
+                if let Some(rates) = &ctx.metadata.rates {
+                    ui.separator();
+                    ui.label(RichText::new(rates.to_string()).weak())
                     .on_hover_text(
                         "The rate curve the selected flight was flown on, as the log records it: \
                          type, then the roll/pitch/yaw rate values. Not deg/s — turning these \
                          into a maximum rate needs a different formula per rate type.",
                     );
+                }
+            });
+
+            let dragging = self.show_knobs(ui, ctx.flight.duration_s() / 4.0);
+            ui.add_space(4.0);
+
+            // Resolved once, so the cache and the plots below agree on which
+            // flights are on screen even if the store changed under a stale key.
+            let resolved: Vec<(FlightKey, &FlightData)> = slots
+                .iter()
+                .filter_map(|&key| Some((key, ctx.catalog.resolve(key)?.flight)))
+                .collect();
+            self.cache.refresh(&self.analyzer, dragging, &resolved);
+
+            // Copied out before the cache is borrowed for the rest of the frame.
+            let show_individual = self.show_individual && !comparing;
+            let compared: Vec<Compared<'_>> = slots
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, &key)| {
+                    let flight = ctx.catalog.resolve(key)?;
+                    Some(Compared {
+                        slot,
+                        label: ctx.catalog.label(key).unwrap_or_default(),
+                        step: self.cache.analysis(key, &flight.analysis.step),
+                    })
+                })
+                .collect();
+
+            // Only the axes that draw share the height: a craft logging one axis
+            // gets a full-size plot, not a third of the panel and two dead gaps.
+            let drawn = drawn_axes(&compared);
+            let plot_height = stacked_plot_height(ui, drawn.len());
+            let palette = colors::palette(ui.ctx());
+
+            for axis in Axis::ALL {
+                ui.label(RichText::new(axis.name()).strong());
+
+                // Union, not intersection: one setpoint-less sublog must not blank
+                // an axis for the whole comparison — but every flight that cannot
+                // fill it still says so, by name now that several are on screen.
+                for note in axis_notes(axis, &compared) {
+                    ui.label(note);
+                }
+
+                match drawn.contains(&axis) {
+                    true => show_axis(ui, &palette, axis, &compared, plot_height, show_individual),
+                    false => ui.add_space(8.0),
+                }
             }
         });
-
-        let dragging = self.show_knobs(ui, ctx.flight.duration_s() / 4.0);
-        ui.add_space(4.0);
-
-        // Resolved once, so the cache and the plots below agree on which
-        // flights are on screen even if the store changed under a stale key.
-        let resolved: Vec<(FlightKey, &FlightData)> = slots
-            .iter()
-            .filter_map(|&key| Some((key, ctx.catalog.resolve(key)?.flight)))
-            .collect();
-        self.cache.refresh(&self.analyzer, dragging, &resolved);
-
-        // Copied out before the cache is borrowed for the rest of the frame.
-        let show_individual = self.show_individual && !comparing;
-        let compared: Vec<Compared<'_>> = slots
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, &key)| {
-                let flight = ctx.catalog.resolve(key)?;
-                Some(Compared {
-                    slot,
-                    label: ctx.catalog.label(key).unwrap_or_default(),
-                    step: self.cache.analysis(key, &flight.analysis.step),
-                })
-            })
-            .collect();
-
-        // Only the axes that draw share the height: a craft logging one axis
-        // gets a full-size plot, not a third of the panel and two dead gaps.
-        let drawn = drawn_axes(&compared);
-        let plot_height = stacked_plot_height(ui, drawn.len());
-        let palette = colors::palette(ui.ctx());
-
-        for axis in Axis::ALL {
-            ui.label(RichText::new(axis.name()).strong());
-
-            // Union, not intersection: one setpoint-less sublog must not blank
-            // an axis for the whole comparison — but every flight that cannot
-            // fill it still says so, by name now that several are on screen.
-            for note in axis_notes(axis, &compared) {
-                ui.label(note);
-            }
-
-            match drawn.contains(&axis) {
-                true => show_axis(ui, &palette, axis, &compared, plot_height, show_individual),
-                false => ui.add_space(8.0),
-            }
-        }
     }
 
     /// Collapsed by default, so the pilot who only wants the curve sees the
@@ -516,6 +518,9 @@ fn show_axis(
         .height(height)
         .x_axis_label("ms")
         .y_axis_label("normalised")
+        .allow_zoom(Vec2b::new(true, true))
+        .allow_scroll(Vec2b::new(true, false))
+        .allow_drag(Vec2b::new(true, true))
         .show(ui, |plot_ui| {
             for c in compared {
                 let Ok(response) = c.step.axis(axis) else {
