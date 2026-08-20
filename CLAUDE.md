@@ -60,6 +60,7 @@ src/
 ├── main.rs                  ← entry point, initialise eframe
 ├── lib.rs                   ← the library half: everything but the UI
 ├── loader.rs                ← paths in, parsed-and-analysed logs out
+├── version.rs               ← is a newer release out, and which asset is ours
 │
 ├── parser/
 │   ├── mod.rs               ← wraps blackbox-log, field detection, header decode
@@ -84,6 +85,7 @@ src/
     ├── colors.rs            ← axis, compare-slot and overlay palettes
     ├── log_store.rs         ← LogId, FlightKey, the read-only FlightCatalog
     ├── sidepanel.rs         ← file list and selection
+    ├── update.rs            ← the check thread, and the strip that offers it
     ├── ui/                  ← widgets shared across tabs
     │   ├── compare.rs       ← compare chips and picker
     │   ├── heatmap.rs       ← heatmap rendering
@@ -331,6 +333,42 @@ where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer
 
 ---
 
+### Update check
+
+One unauthenticated `GET api.github.com/repos/PedroS235/blackbird/releases/latest`
+on startup, on a plain `std::thread` — `blackbird::version` does the compare,
+`app::update` owns the thread and the strip.
+
+- It **offers**, it never self-updates. The release assets are bare, unsigned
+  binaries: replacing one in place would mean defeating Gatekeeper on macOS,
+  renaming a running `.exe` on Windows, and guessing whether a Linux install
+  came from a package manager — with no checksum or signature to verify the
+  download against. Self-update is its own milestone, after signing
+- **It resolves the asset for the platform it is running on**: `env::consts::OS`
+  and `ARCH` are mapped to `release.yml`'s own names — note `aarch64` → `arm64`
+  — and the name is looked up in the release's asset list. No asset for this
+  platform (32-bit, BSD, anything outside the matrix) falls back to the release
+  page. `asset_name` and `newer` take `os`/`arch` as parameters, so every
+  target's name is a unit test on one machine
+- **Every failure is silence.** Offline, rate-limited, renamed repo, a tag that
+  is not a version, a release older than this build: `debug!` and nothing in the
+  UI. The pilot opened the app to read a log
+- `ureq` + rustls, not `reqwest`: one blocking GET does not justify a tokio
+  runtime, and rustls keeps the binary self-contained — native-tls would
+  dynamically link OpenSSL and break the drop-it-anywhere promise on any distro
+  with a different libssl. Nothing links OpenSSL now, so `release.yml` no longer
+  installs `libssl-dev`
+- The strip is a `Panel::top` above everything, dismissible for the session
+  only. Dismissal is the absence of state, not a flag — the offer is dropped, so
+  it returns on the next launch. Persisting a "skip this version" would need the
+  settings store that does not exist yet
+- **`Cargo.toml`'s version is the single source of truth**, and the `verify` job
+  in `release.yml` fails a tag that disagrees with it before any of the six
+  builds start. So **tagging a release needs a version-bump commit first**.
+  Without that gate the checker silently lies: the tree sat at 0.1.0 through six
+  releases, and every user would have been told forever that an update was
+  waiting
+
 ## AI integration
 
 ### LlmBackend trait
@@ -440,6 +478,9 @@ _(none yet — project is in initial setup)_
 | Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
 | Overlays default to off, behind an inline toggle row | The panel opens as a clean spectrum, so every mark over the curve is one the pilot asked for. The toggles are laid out inline rather than in a dropdown: a button that opens a menu announces nothing, and with every family off there is no mark on the plot to hint that more exists. One wrapped row is the whole cost |
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
+| Update check offers a download, never self-replaces | Assets are unsigned bare binaries and the install source is unknowable — a self-updater would fight Gatekeeper, a running `.exe`, and package managers, with nothing to verify the download against |
+| `ureq` + rustls for the update check, not `reqwest` | One blocking GET does not justify pulling in a tokio runtime, and rustls keeps the single binary free of a libssl dynamic link |
+| Tag-vs-`Cargo.toml` gate as the first CI job | The version the binary reports is what the update check compares; drift makes it lie to every user. Fails in seconds instead of after six matrix builds |
 | AI as trait with two backends | Anthropic for quality, Ollama for offline/privacy. Swappable at runtime |
 | `prompt.rs` isolated from API plumbing | Prompt is a product decision iterated independently of transport code |
 

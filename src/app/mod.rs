@@ -5,6 +5,7 @@ mod sidepanel;
 mod tabs;
 pub(crate) mod theme;
 mod ui;
+mod update;
 
 use std::{collections::VecDeque, sync::mpsc};
 
@@ -16,6 +17,7 @@ use crate::{
         log_store::{LoadState, LogStore},
         notification::Notification,
         tabs::Tabs,
+        update::UpdateCheck,
     },
     loader::{LoadEvent, LogLoader},
 };
@@ -29,6 +31,7 @@ pub struct BlackbirdApp {
     load_state: LoadState,
     tabs: Tabs,
     theme_preference: egui::ThemePreference,
+    update: UpdateCheck,
 }
 
 impl Default for BlackbirdApp {
@@ -41,6 +44,7 @@ impl Default for BlackbirdApp {
             load_state: LoadState::Idle,
             tabs: Tabs::default(),
             theme_preference: Default::default(),
+            update: Default::default(),
         }
     }
 }
@@ -52,6 +56,7 @@ impl App for BlackbirdApp {
         self.poll_load(ui.ctx());
         self.show_loading_modal(ui.ctx());
 
+        self.show_update_strip(ui);
         self.show_sidepanel(ui);
         self.show_notifications(ui);
         self.tabs.show(ui, &self.logs);
@@ -59,6 +64,15 @@ impl App for BlackbirdApp {
 }
 
 impl BlackbirdApp {
+    /// `Default` cannot do this: the update check needs the `Context` to wake
+    /// the UI when its answer lands, and only `eframe` hands that out.
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            update: UpdateCheck::spawn(&cc.egui_ctx),
+            ..Default::default()
+        }
+    }
+
     pub fn notify(&mut self, level: notification::Level, msg: impl Into<String>) {
         let msg = msg.into();
         match level {

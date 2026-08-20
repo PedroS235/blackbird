@@ -2,7 +2,7 @@
 
 mod app;
 
-use blackbird::{analysis, loader, logging, parser, signal};
+use blackbird::{analysis, loader, logging, parser, signal, version};
 use logging::init_logging;
 
 fn main() {
@@ -31,7 +31,7 @@ fn main() {
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             app::theme::install(&cc.egui_ctx);
-            Ok(Box::<app::BlackbirdApp>::default())
+            Ok(Box::new(app::BlackbirdApp::new(cc)))
         }),
     )
     .unwrap();

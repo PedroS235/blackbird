@@ -5,7 +5,25 @@ on:
     tags: ["v*"]
 
 jobs:
+  # Fails in seconds, before six matrix builds burn CI on a release that would
+  # ship a binary lying about its own version — the update check compares
+  # CARGO_PKG_VERSION against the latest tag, so the two must never drift.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches Cargo.toml version
+        run: |
+          cargo_version=$(awk -F'"' '/^\[/{section=$0} section=="[package]" && /^version *=/{print $2; exit}' Cargo.toml)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$cargo_version" != "$tag_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME wants version $tag_version, Cargo.toml says $cargo_version"
+            exit 1
+          fi
+
   build:
+    needs: verify
     strategy:
       matrix:
         include:
@@ -42,7 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+            libxcb-xfixes0-dev libxkbcommon-dev
 
       - run: cargo build --release --target ${{ matrix.target }}
 
