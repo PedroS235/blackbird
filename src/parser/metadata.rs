@@ -42,6 +42,10 @@ pub struct LowpassConfig {
     pub static_hz: f32,
     pub dyn_min_hz: f32,
     pub dyn_max_hz: f32,
+    /// Shapes how the cutoff scales across the dynamic range, 0..=100. Both
+    /// loops have one — it used to sit on a D-term-only wrapper type, which
+    /// left the gyro's unread and its dynamic curve wrong.
+    pub dyn_expo: f32,
     pub filter_type: FilterType,
 }
 
@@ -50,23 +54,29 @@ impl LowpassConfig {
         self.static_hz == 0.0
     }
 
-    /// Single cutoff estimate for display/markers — the fixed value, or the
-    /// dynamic range's ceiling as a worst case.
-    pub fn cutoff_hz(&self) -> f32 {
-        if self.static_hz > 0.0 {
-            self.static_hz
-        } else {
-            self.dyn_max_hz
+    /// The cutoff this stage ran at, for a throttle in 0..=1.
+    ///
+    /// Betaflight's `dynLpfCutoffFreq`, with the pre-expo `dynThrottle` curve
+    /// for the builds and configs that set no expo. A static stage ignores the
+    /// throttle and answers its one cutoff.
+    pub fn cutoff_at(&self, throttle: f32) -> f32 {
+        if !self.is_dynamic() {
+            return self.static_hz;
+        }
+        let throttle = throttle.clamp(0.0, 1.0);
+        let (min, max) = (self.dyn_min_hz, self.dyn_max_hz);
+
+        match self.dyn_expo > 0.0 {
+            true => {
+                let curve = throttle * (1.0 - throttle) * (self.dyn_expo / 10.0) + throttle;
+                (max - min) * curve + min
+            }
+            false => {
+                let curve = throttle * (1.0 - throttle * throttle * throttle / 3.0) * 1.5;
+                (curve * max).max(min)
+            }
         }
     }
-}
-
-/// D-term LPF1 adds a dynamic expo curve (0..=100) shaping how the cutoff
-/// scales across the dynamic range; unused when the stage is static.
-#[derive(Debug, Clone)]
-pub struct DtermLowpass1Config {
-    pub lowpass: LowpassConfig,
-    pub dyn_expo: f32,
 }
 
 /// LPF2 stages are always static: a single cutoff and filter type, no dynamic range.
@@ -94,7 +104,7 @@ pub struct DynNotchConfig {
 pub struct FilterConfig {
     pub gyro_lpf1: Option<LowpassConfig>,
     pub gyro_lpf2: Option<StaticLowpassConfig>,
-    pub dterm_lpf1: Option<DtermLowpass1Config>,
+    pub dterm_lpf1: Option<LowpassConfig>,
     pub dterm_lpf2: Option<StaticLowpassConfig>,
     pub gyro_notches: Vec<NotchConfig>,
     pub dterm_notches: Vec<NotchConfig>,
@@ -210,6 +220,18 @@ impl Metadata {
             .unwrap_or(DEFAULT_MOTOR_POLES)
     }
 
+    /// The rate the filters actually run at, which is the PID loop's, not the
+    /// blackbox's — a log recorded at every second frame halves the latter and
+    /// would model every stage as rolling off far earlier than it does.
+    ///
+    /// Falls back to the logged rate where the header is missing.
+    pub fn filter_rate_hz(&self, logged_hz: f64) -> f64 {
+        self.looptime_us
+            .map(|us| 1e6 / us as f64)
+            .filter(|hz| *hz > 0.0)
+            .unwrap_or(logged_hz)
+    }
+
     /// Whether `debug[0..3]` is the dynamic notch tracker's centre frequency.
     /// One rule, read by the spectrogram overlay and the PSD's traced centre
     /// alike — two copies of it would drift apart.
@@ -227,6 +249,60 @@ impl Metadata {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// The filters run at the loop rate. A log written every second frame is
+    /// half that, and modelling a stage at the logging rate would draw it
+    /// rolling off far earlier than it does.
+    #[test]
+    fn the_filter_rate_is_the_loop_rate_not_the_logging_rate() {
+        let metadata = Metadata {
+            looptime_us: Some(125),
+            ..Default::default()
+        };
+
+        assert!((metadata.filter_rate_hz(4000.0) - 8000.0).abs() < 1.0);
+        assert_eq!(Metadata::default().filter_rate_hz(4000.0), 4000.0);
+    }
+
+    fn dynamic(dyn_expo: f32) -> LowpassConfig {
+        LowpassConfig {
+            static_hz: 0.0,
+            dyn_min_hz: 250.0,
+            dyn_max_hz: 500.0,
+            dyn_expo,
+            filter_type: FilterType::Pt1,
+        }
+    }
+
+    /// The ends of the throttle range pin the ends of the cutoff range,
+    /// whatever the expo does between them.
+    #[test]
+    fn a_dynamic_cutoff_spans_its_configured_range() {
+        let lpf = dynamic(5.0);
+
+        assert!((lpf.cutoff_at(0.0) - 250.0).abs() < 1e-3);
+        assert!((lpf.cutoff_at(1.0) - 500.0).abs() < 1e-3);
+        assert!((250.0..=500.0).contains(&lpf.cutoff_at(0.5)));
+    }
+
+    /// Expo bows the curve upward, so mid throttle sits above the straight
+    /// line between the ends.
+    #[test]
+    fn expo_raises_the_cutoff_at_mid_throttle() {
+        assert!(dynamic(5.0).cutoff_at(0.5) > dynamic(0.0).cutoff_at(0.5));
+    }
+
+    /// A static stage answers its one cutoff whatever the throttle did.
+    #[test]
+    fn a_static_lowpass_ignores_the_throttle() {
+        let lpf = LowpassConfig {
+            static_hz: 120.0,
+            ..dynamic(5.0)
+        };
+
+        assert_eq!(lpf.cutoff_at(0.0), 120.0);
+        assert_eq!(lpf.cutoff_at(1.0), 120.0);
+    }
 
     fn with_headers(pairs: &[(&str, &str)]) -> Metadata {
         Metadata {

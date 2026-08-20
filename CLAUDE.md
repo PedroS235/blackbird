@@ -71,7 +71,8 @@ src/
 │
 ├── analysis/
 │   ├── mod.rs               ← Analysis struct, orchestrates the analysers
-│   ├── overlays.rs          ← filter geometry: bands, harmonic groups, traced centre
+│   ├── filter_response.rs   ← what a stage does to a frequency: notch V, LPF rolloff
+│   ├── overlays.rs          ← filter geometry: responses, bands, harmonic groups
 │   ├── spectral.rs          ← PSD, peaks, throttle/time-binned maps
 │   ├── step_response.rs     ← Wiener deconvolution, windowing, averaging
 │   └── filter_delay.rs      ← cross-correlation, delay estimation in ms (planned)
@@ -230,24 +231,36 @@ load, and storing it puts the feature behind the loader integration seam.
 - One `FilterOverlay { label, family, shape }`. `OverlayFamily` carries the
   gyro/D-term loop, so a panel selects gyro overlays by matching the type
   rather than by `label.starts_with("Gyro")`
-- `OverlayShape::Line` — a fixed lowpass corner, the only filter with no width
-- `OverlayShape::Band` — a notch's −3 dB width (`centre / Q`, with Q derived
-  from centre and cutoff as Betaflight's `filterGetNotchQ` does), a dynamic
-  lowpass's swept range, or the dynamic notch's configured range. A dynamic
-  filter drawn at one nominal centre is a guess at a frequency it never sat at
+- `OverlayShape::Response` — what a filter took off, per frequency, from
+  `analysis::filter_response`. A notch is a V and a lowpass is a rolloff;
+  drawn as a line or a band, both read as "everything here is gone", which is
+  the one thing neither does. Static notches and every lowpass stage draw this
+- `OverlayShape::Traced` — the same, where it had to be measured per axis: the
+  dynamic notch, whose centre Betaflight logs one of per axis. Read from
+  `debug[0..3]`, gated on `Metadata::logs_dyn_notch_trace()` (debug mode
+  `FFT_FREQ`) — the one rule, shared with the Spectrogram sub-tab's overlay
+- **A filter that moved is averaged over the settings it moved through**,
+  weighted by how long it spent at each and averaged **in power, not in
+  decibels**. A frequency notched hard for a tenth of the flight and untouched
+  for the rest kept nine tenths of its energy, which averaging decibels would
+  report as a cut it never got. So a dynamic notch pinned at one frequency
+  draws a deep narrow V and a roaming one draws a broad shallow trough; a
+  dynamic LPF is averaged over the cutoffs the *throttle* actually produced,
+  through Betaflight's own `dynLpfCutoffFreq` curve
+- `OverlayShape::Band` — only what a filter is *allowed* to do: the dynamic
+  notch's configured bounds, and a dynamic LPF whose log has no throttle
+- `OverlayShape::Line` — only a notch whose cutoff cannot give a Q, so its
+  shape cannot be derived. Everything sizeable draws its response
 - `OverlayShape::Harmonics` — one band per motor per order, from `eRPM`, over
   the frequencies that motor actually reached. Order count comes from
   `RpmFilterConfig::harmonics`; a zero-weight order is flagged unfiltered.
   Stopped-motor samples are excluded, so no band runs down to 0 Hz
-- `OverlayShape::Traced` — what the dynamic notch actually took off, per
-  axis. A notch is a V, not a rectangle, and a *dynamic* notch has no one
-  centre, so this is the biquad response at every centre the tracker used,
-  averaged **in power** (not in decibels) by how long it sat there. A tracker
-  that sat still draws a deep narrow V; one that roamed draws a broad shallow
-  trough, because no frequency ever got the full cut. Read from `debug[0..3]`,
-  gated on `Metadata::logs_dyn_notch_trace()` (debug mode `FFT_FREQ`) — the
-  one rule, shared with the Spectrogram sub-tab's overlay. Betaflight logs one
-  centre per axis however many notches are configured, so only one is drawn
+- Responses are modelled at **`Metadata::filter_rate_hz`, the PID loop rate**,
+  not the logging rate — a log written every second frame would otherwise show
+  every stage rolling off far earlier than it does. They are the discrete
+  filters Betaflight runs, so a stage's real corner sits somewhat below its
+  configured one once that cutoff is a sizeable fraction of the loop rate.
+  That gap is a true thing about the tune, and the curve keeps it
 - `eRPM` → Hz is `erpm * 100 / (poles / 2) / 60`. `motor_poles` comes from the
   raw header passthrough, defaulting to Betaflight's 14
 - Overlay visibility is UI state (`ui::overlay_menu::OverlayVisibility`), a

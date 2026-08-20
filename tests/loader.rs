@@ -205,21 +205,42 @@ fn a_log_flown_in_another_debug_mode_still_gets_the_configured_range() {
     assert!(matches!(dyn_notch[0].shape, OverlayShape::Band { .. }));
 }
 
-/// A dynamic lowpass is the range its cutoff swept, not the ceiling — this
-/// fixture ran gyro LPF1 dynamic across 250..500 Hz.
+/// Both gyro lowpass stages reach the plot as the rolloff they are, not as a
+/// line at a corner or a band across a range. This fixture ran LPF1 dynamic
+/// across 250..500 Hz and LPF2 fixed at 500.
 #[test]
-fn a_dynamic_lowpass_reaches_the_plot_as_its_range() {
+fn the_gyro_lowpasses_reach_the_plot_as_their_rolloffs() {
     let overlays = overlays(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
     let gyro = family(&overlays, OverlayFamily::Lowpass(FilterLoop::Gyro));
+    assert_eq!(gyro.len(), 2);
 
-    assert_eq!(
-        gyro[0].shape,
-        OverlayShape::Band {
-            low_hz: 250.0,
-            high_hz: 500.0
-        }
+    let corner = |overlay: &FilterOverlay| {
+        let OverlayShape::Response(response) = &overlay.shape else {
+            panic!("{} is not drawn as a response", overlay.label);
+        };
+        assert!(response.gain_db.iter().all(|&g| (-40.0..=0.0).contains(&g)));
+        response.corner().expect("a corner").0
+    };
+
+    // The pilot hovered, so LPF1's cutoff sat near the bottom of its dynamic
+    // range all flight — nowhere near the 500 Hz ceiling a single line used to
+    // stand in for.
+    let lpf1 = corner(gyro[0]);
+    assert!(
+        (180.0..330.0).contains(&lpf1),
+        "LPF1 corner at {lpf1:.0} Hz"
     );
-    assert_eq!(gyro[1].shape, OverlayShape::Line { hz: 500.0 });
+
+    // LPF2 never moved, so it draws one rolloff — and it starts well under its
+    // nominal 500 Hz, because this craft flew a 3.2 kHz loop and Betaflight's
+    // one-pole rolls off early once its cutoff is a sizeable fraction of that.
+    // Which is the sort of thing a line drawn at 500 Hz could never say.
+    let lpf2 = corner(gyro[1]);
+    assert!(
+        (320.0..440.0).contains(&lpf2),
+        "LPF2 corner at {lpf2:.0} Hz"
+    );
+    assert!(lpf2 > lpf1);
 }
 
 /// A notch that was never enabled is not a filter at zero hertz.

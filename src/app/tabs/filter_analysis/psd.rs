@@ -4,8 +4,8 @@ use elegance::Palette;
 
 use super::drawn_axes;
 use crate::analysis::{
-    AxisSpectral, DynNotchReach, FilterOverlay, FrequencyPeak, HarmonicBand, OverlayFamily,
-    OverlayShape, SpectralAnalysis, TracedResponse,
+    AxisSpectral, DynNotchReach, FilterOverlay, FilterResponse, FrequencyPeak, HarmonicBand,
+    OverlayFamily, OverlayShape, SpectralAnalysis,
 };
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
@@ -154,9 +154,12 @@ fn draw_overlay(
                 .border_color(color),
         ),
         OverlayShape::Harmonics(bands) => draw_harmonics(plot_ui, palette, bands),
+        OverlayShape::Response(response) => {
+            draw_response(plot_ui, palette, response, anchor_db, &overlay.label)
+        }
         OverlayShape::Traced(per_axis) => {
-            if let Some(traced) = per_axis[axis].as_ref() {
-                draw_traced_response(plot_ui, palette, traced, anchor_db, &overlay.label);
+            if let Some(response) = per_axis[axis].as_ref() {
+                draw_response(plot_ui, palette, response, anchor_db, &overlay.label);
             }
         }
     }
@@ -188,17 +191,17 @@ fn draw_harmonics(plot_ui: &mut PlotUi<'_>, palette: &Palette, bands: &[Harmonic
     }
 }
 
-/// What the notch actually took off, as the V it really is.
+/// What a filter actually took off, as the shape it really has.
 ///
-/// A dynamic notch has no one centre, so this is its response at every centre
-/// the tracker used, averaged by how long it sat there: pinned at one
-/// frequency it draws a deep narrow V, roaming it draws a broad shallow
-/// trough. A band across the configured range said neither, and a band is
-/// what a pilot reads as "everything in here is gone".
-fn draw_traced_response(
+/// A notch is a V and a lowpass is a rolloff. Both were drawn as a line or a
+/// band, which a pilot reads as "everything in here is gone" — the one thing
+/// neither does. A filter that moved during the flight is the average of the
+/// settings it moved through, so one held still draws its own curve and one
+/// swept draws the shallower, wider average of the corners it passed.
+fn draw_response(
     plot_ui: &mut PlotUi<'_>,
     palette: &Palette,
-    traced: &TracedResponse,
+    response: &FilterResponse,
     anchor_db: f64,
     label: &str,
 ) {
@@ -207,17 +210,31 @@ fn draw_traced_response(
     }
     let color = colors::filter_color(palette);
 
-    let curve: PlotPoints = traced
+    let curve: PlotPoints = response
         .freq_hz
         .iter()
-        .zip(&traced.gain_db)
+        .zip(&response.gain_db)
         .map(|(&f, &gain)| [f, anchor_db + gain])
         .collect();
     plot_ui.line(Line::new(label.to_string(), curve).color(color));
 
-    // The line the V is measured down from — without it the curve is a shape
-    // with no scale, and "how deep" is the whole question.
+    // The line every curve is measured down from — without it a curve is a
+    // shape with no scale, and "how far down" is the whole question.
     plot_ui.hline(HLine::new(String::new(), anchor_db).color(color.gamma_multiply(0.4)));
+
+    // Curves share one colour, so each says which stage it is at the point it
+    // starts taking something — a notch's near edge, a lowpass's corner.
+    if let Some((freq, gain)) = response.corner() {
+        plot_ui.text(
+            Text::new(
+                format!("{label}_label"),
+                PlotPoint::new(freq, anchor_db + gain),
+                label,
+            )
+            .color(color)
+            .anchor(Align2::CENTER_TOP),
+        );
+    }
 }
 
 /// One mark per peak, and a label on the loudest few. A peak the dynamic notch

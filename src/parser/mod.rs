@@ -200,14 +200,9 @@ fn parse_rate_config(
 
 fn parse_filter_config(h: &std::collections::HashMap<String, String>) -> metadata::FilterConfig {
     metadata::FilterConfig {
-        gyro_lpf1: parse_lowpass(
-            h,
-            "gyro_lpf1_static_hz",
-            "gyro_lpf1_dyn_hz",
-            "gyro_lpf1_type",
-        ),
+        gyro_lpf1: parse_lowpass(h, "gyro_lpf1"),
         gyro_lpf2: parse_static_lowpass(h, "gyro_lpf2_static_hz", "gyro_lpf2_type"),
-        dterm_lpf1: parse_dterm_lpf1(h),
+        dterm_lpf1: parse_lowpass(h, "dterm_lpf1"),
         dterm_lpf2: parse_static_lowpass(h, "dterm_lpf2_static_hz", "dterm_lpf2_type"),
         gyro_notches: parse_notches(h, "gyro_notch_hz", "gyro_notch_cutoff"),
         dterm_notches: parse_notches(h, "dterm_notch_hz", "dterm_notch_cutoff"),
@@ -226,18 +221,18 @@ fn parse_filter_type(
         .unwrap_or_default()
 }
 
+/// The four headers of one LPF1 stage, which differ only in their `gyro_`/
+/// `dterm_` prefix.
 fn parse_lowpass(
     h: &std::collections::HashMap<String, String>,
-    static_key: &str,
-    dyn_key: &str,
-    type_key: &str,
+    prefix: &str,
 ) -> Option<metadata::LowpassConfig> {
-    let static_hz = h
-        .get(static_key)
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .unwrap_or(0.0);
+    let number =
+        |suffix: &str| -> Option<f32> { h.get(&format!("{prefix}_{suffix}"))?.trim().parse().ok() };
+
+    let static_hz = number("static_hz").unwrap_or(0.0);
     let (dyn_min_hz, dyn_max_hz) = h
-        .get(dyn_key)
+        .get(&format!("{prefix}_dyn_hz"))
         .and_then(|v| {
             let mut parts = v.split(',').filter_map(|s| s.trim().parse::<f32>().ok());
             Some((parts.next()?, parts.next()?))
@@ -251,7 +246,8 @@ fn parse_lowpass(
         static_hz,
         dyn_min_hz,
         dyn_max_hz,
-        filter_type: parse_filter_type(h, type_key),
+        dyn_expo: number("dyn_expo").unwrap_or(0.0),
+        filter_type: parse_filter_type(h, &format!("{prefix}_type")),
     })
 }
 
@@ -271,22 +267,6 @@ fn parse_static_lowpass(
         cutoff_hz,
         filter_type: parse_filter_type(h, type_key),
     })
-}
-
-fn parse_dterm_lpf1(
-    h: &std::collections::HashMap<String, String>,
-) -> Option<metadata::DtermLowpass1Config> {
-    let lowpass = parse_lowpass(
-        h,
-        "dterm_lpf1_static_hz",
-        "dterm_lpf1_dyn_hz",
-        "dterm_lpf1_type",
-    )?;
-    let dyn_expo = h
-        .get("dterm_lpf1_dyn_expo")
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .unwrap_or(0.0);
-    Some(metadata::DtermLowpass1Config { lowpass, dyn_expo })
 }
 
 fn parse_notches(
