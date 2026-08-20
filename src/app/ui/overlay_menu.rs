@@ -35,6 +35,14 @@ fn title(family: OverlayFamily) -> String {
     }
 }
 
+/// Detected noise peaks are not a filter — nothing configured them, the
+/// analysis found them — so they are not an `OverlayFamily`. They get a switch
+/// beside the families because to a pilot they are one more thing drawn over
+/// the curve, and user story 1 asks for a panel that opens with none of it.
+const PEAKS_TITLE: &str = "Show detected peaks";
+const NO_PEAKS: &str =
+    "Nothing in this log rose far enough above the noise floor to be reported as a peak.";
+
 /// Why the switch is greyed out. A control the log cannot fill says what the
 /// log is missing rather than vanishing.
 fn unavailable_reason(family: OverlayFamily) -> &'static str {
@@ -69,6 +77,7 @@ fn flag(family: OverlayFamily) -> usize {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::app) struct OverlayVisibility {
     families: [bool; MENU_ORDER.len()],
+    peaks: bool,
 }
 
 impl OverlayVisibility {
@@ -76,8 +85,12 @@ impl OverlayVisibility {
         self.families[flag(family)]
     }
 
+    pub(in crate::app) fn shows_peaks(&self) -> bool {
+        self.peaks
+    }
+
     fn enabled_count(&self) -> usize {
-        self.families.iter().filter(|&&on| on).count()
+        self.families.iter().filter(|&&on| on).count() + usize::from(self.peaks)
     }
 }
 
@@ -87,6 +100,7 @@ pub(in crate::app) fn show(
     ui: &mut Ui,
     visibility: &mut OverlayVisibility,
     overlays: &[FilterOverlay],
+    has_peaks: bool,
 ) {
     let label = match visibility.enabled_count() {
         0 => "Overlays".to_string(),
@@ -94,6 +108,12 @@ pub(in crate::app) fn show(
     };
 
     ui.menu_button(label, |ui| {
+        ui.label(RichText::new("Peaks").strong());
+        let peaks = ui.add_enabled(has_peaks, Switch::new(&mut visibility.peaks, PEAKS_TITLE));
+        if !has_peaks {
+            peaks.on_disabled_hover_text(NO_PEAKS);
+        }
+
         let mut section = None;
         for family in MENU_ORDER {
             // One heading per family, so the gyro and D-term switches read as
@@ -131,6 +151,7 @@ mod test {
         let visibility = OverlayVisibility::default();
 
         assert!(MENU_ORDER.iter().all(|&f| !visibility.shows(f)));
+        assert!(!visibility.shows_peaks());
         assert_eq!(visibility.enabled_count(), 0);
     }
 
@@ -144,6 +165,19 @@ mod test {
 
         assert!(visibility.shows(OverlayFamily::DynNotch));
         assert!(!visibility.shows(OverlayFamily::Harmonics));
+        assert_eq!(visibility.enabled_count(), 1);
+    }
+
+    /// Peaks are not a filter family, and toggling them must not move one.
+    #[test]
+    fn peaks_have_their_own_switch() {
+        let visibility = OverlayVisibility {
+            peaks: true,
+            ..Default::default()
+        };
+
+        assert!(visibility.shows_peaks());
+        assert!(MENU_ORDER.iter().all(|&f| !visibility.shows(f)));
         assert_eq!(visibility.enabled_count(), 1);
     }
 

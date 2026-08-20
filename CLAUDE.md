@@ -247,7 +247,10 @@ load, and storing it puts the feature behind the loader integration seam.
   raw header passthrough, defaulting to Betaflight's 14
 - Overlay visibility is UI state (`ui::overlay_menu::OverlayVisibility`), a
   shared type with a separate instance per sub-tab, every family off by
-  default. Toggling one never recomputes anything
+  default. Toggling one never recomputes anything. Detected peaks get a switch
+  there too, and default off with the rest — they are not a filter and so not
+  an `OverlayFamily`, but to a pilot they are one more thing drawn over the
+  curve
 
 ### Step response
 

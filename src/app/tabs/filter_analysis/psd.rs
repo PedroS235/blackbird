@@ -37,7 +37,13 @@ pub(super) struct Psd {
 
 impl Psd {
     pub(super) fn show(&mut self, ui: &mut Ui, analysis: &SpectralAnalysis) {
-        overlay_menu::show(ui, &mut self.overlays, &analysis.overlays);
+        // A log whose peaks all sat inside the noise floor cannot fill the
+        // peaks switch either, and it greys out like any other.
+        let has_peaks = Axis::ALL
+            .iter()
+            .filter_map(|&axis| analysis.axis(axis))
+            .any(|spec| !spec.peaks.is_empty());
+        overlay_menu::show(ui, &mut self.overlays, &analysis.overlays, has_peaks);
         ui.add_space(4.0);
 
         // After the menu, and over the axes that draw: measuring first would
@@ -95,12 +101,21 @@ impl Psd {
                     for overlay in &visible {
                         draw_overlay(plot_ui, &palette, overlay, axis);
                     }
-                    draw_peaks(plot_ui, &palette, spec);
+                    if self.overlays.shows_peaks() {
+                        draw_peaks(plot_ui, &palette, spec);
+                    }
                 });
 
             // Under the plot rather than on it: the verdict has to survive the
-            // pilot zooming the offending peak off screen.
-            if let Some(prose) = out_of_reach_prose(spec, &analysis.overlays) {
+            // pilot zooming the offending peak off screen. It follows the
+            // peaks switch — a pilot who hid the peaks is not asking to be
+            // told about them in prose instead.
+            if let Some(prose) = self
+                .overlays
+                .shows_peaks()
+                .then(|| out_of_reach_prose(spec, &analysis.overlays))
+                .flatten()
+            {
                 ui.label(RichText::new(prose).color(palette.warning));
             }
         }
@@ -323,6 +338,7 @@ mod test {
                 .iter()
                 .all(|&family| !panel.overlays.shows(family))
         );
+        assert!(!panel.overlays.shows_peaks());
     }
 
     fn peak(freq_hz: f64, reach: Option<DynNotchReach>) -> FrequencyPeak {
