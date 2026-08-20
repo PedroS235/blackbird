@@ -1,6 +1,6 @@
 # 03 — Harmonic group geometry
 
-Status: todo
+Status: done
 
 Per motor per harmonic order, the minimum and maximum frequency that motor
 reached over the analysed (trimmed) window, plus whether that order's RPM

@@ -15,6 +15,18 @@ pub(in crate::app) const COMPARE_SLOTS: usize = 4;
 /// survives a theme toggle mid-session. Only luminance comes from the palette.
 const SLOT_HUES: [f32; COMPARE_SLOTS] = [0.58, 0.08, 0.45, 0.87];
 
+/// Fixed hues for the harmonic orders — amber, violet, spring green — in the
+/// same spirit as the compare slots: "the amber band is the fundamental"
+/// survives a theme toggle, and none of the three is one of Betaflight's
+/// roll/pitch/yaw accents.
+const HARMONIC_HUES: [f32; 3] = [0.11, 0.79, 0.35];
+
+/// Gold for a detected peak, periwinkle for a configured filter. Both were
+/// fixed RGB constants in the panels until now, which meant light mode drew
+/// the dark theme's marks.
+const PEAK_HUE: f32 = 0.14;
+const FILTER_HUE: f32 = 0.63;
+
 /// Saturation of the base flight's colour against the flights it is compared
 /// against. Saturation rather than luminance is what steps the secondaries
 /// back: dropping luminance would cost contrast against the background in one
@@ -44,16 +56,39 @@ pub(in crate::app) fn axis_color(palette: &Palette, axis: Axis) -> Color32 {
 /// flight is always slot 0, so switching the sidepanel changes which curve
 /// wears a colour without moving the colour itself. Identity lives on the chip.
 pub(in crate::app) fn slot_color(palette: &Palette, slot: usize) -> Color32 {
-    let value = if palette.is_dark { 0.95 } else { 0.55 };
     let saturation = match slot {
         0 => BASE_SATURATION,
         _ => COMPARED_SATURATION,
     };
+    hue_color(palette, SLOT_HUES[slot % COMPARE_SLOTS], saturation)
+}
 
+/// A detected noise peak.
+pub(in crate::app) fn peak_color(palette: &Palette) -> Color32 {
+    hue_color(palette, PEAK_HUE, BASE_SATURATION)
+}
+
+/// A configured filter's line or band — a reference the pilot set, not
+/// something the craft did.
+pub(in crate::app) fn filter_color(palette: &Palette) -> Color32 {
+    hue_color(palette, FILTER_HUE, BASE_SATURATION)
+}
+
+/// A harmonic order's colour, 1 being the fundamental. Order, not motor: four
+/// motors at one order are the same noise, and what a pilot needs to tell
+/// apart is a fundamental from its multiples.
+pub(in crate::app) fn harmonic_color(palette: &Palette, order: u32) -> Color32 {
+    let index = order.max(1) as usize - 1;
+    hue_color(palette, HARMONIC_HUES[index % HARMONIC_HUES.len()], 0.85)
+}
+
+/// Hue is the identity and survives a theme switch; only luminance comes from
+/// the palette, so a mark keeps its contrast in both.
+fn hue_color(palette: &Palette, hue: f32, saturation: f32) -> Color32 {
     HsvaGamma {
-        h: SLOT_HUES[slot % COMPARE_SLOTS],
+        h: hue,
         s: saturation,
-        v: value,
+        v: if palette.is_dark { 0.95 } else { 0.55 },
         a: 1.0,
     }
     .into()
@@ -107,11 +142,21 @@ mod test {
     }
 
     #[test]
-    fn slots_and_axes_are_legible_on_the_background_they_are_drawn_on() {
+    fn every_mark_is_legible_on_the_background_it_is_drawn_on() {
         for palette in palettes() {
             let drawn = (0..COMPARE_SLOTS)
                 .map(|slot| (format!("slot {slot}"), slot_color(&palette, slot)))
-                .chain(Axis::ALL.map(|axis| (axis.name().to_string(), axis_color(&palette, axis))));
+                .chain(Axis::ALL.map(|axis| (axis.name().to_string(), axis_color(&palette, axis))))
+                .chain(
+                    (1..=HARMONIC_HUES.len() as u32).map(|order| {
+                        (format!("harmonic {order}"), harmonic_color(&palette, order))
+                    }),
+                )
+                .chain([
+                    ("peak".to_string(), peak_color(&palette)),
+                    ("filter".to_string(), filter_color(&palette)),
+                    ("warning".to_string(), palette.warning),
+                ]);
 
             for (what, color) in drawn {
                 let ratio = contrast(color, palette.bg);
@@ -137,5 +182,55 @@ mod test {
                 axis.name()
             );
         }
+    }
+
+    /// A fundamental and its multiples have to be tellable apart at a glance,
+    /// and none of them may be mistaken for an axis trace.
+    #[test]
+    fn harmonic_orders_are_distinct_from_each_other_and_from_the_axes() {
+        for palette in palettes() {
+            let orders: Vec<Color32> = (1..=HARMONIC_HUES.len() as u32)
+                .map(|order| harmonic_color(&palette, order))
+                .collect();
+
+            for (i, &color) in orders.iter().enumerate() {
+                for &other in &orders[i + 1..] {
+                    assert_ne!(color, other, "two harmonic orders share a colour");
+                }
+                for axis in Axis::ALL {
+                    assert_ne!(
+                        color,
+                        axis_color(&palette, axis),
+                        "harmonic {} is the {} trace's colour",
+                        i + 1,
+                        axis.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The order sequence wraps rather than panicking on a craft configured
+    /// with more harmonics than there are hues.
+    #[test]
+    fn an_order_past_the_hue_sequence_wraps() {
+        let palette = Palette::charcoal();
+        let orders = HARMONIC_HUES.len() as u32;
+
+        assert_eq!(
+            harmonic_color(&palette, orders + 1),
+            harmonic_color(&palette, 1)
+        );
+    }
+
+    /// The defect this replaced, for the overlay marks this time: both were
+    /// fixed RGB constants that drew the same in light mode as in dark.
+    #[test]
+    fn overlay_marks_follow_the_theme() {
+        let [dark, light] = palettes();
+
+        assert_ne!(peak_color(&dark), peak_color(&light));
+        assert_ne!(filter_color(&dark), filter_color(&light));
+        assert_ne!(harmonic_color(&dark, 1), harmonic_color(&light, 1));
     }
 }

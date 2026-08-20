@@ -1,6 +1,6 @@
 # 04 — Traced dynamic notch centre
 
-Status: todo
+Status: done
 
 `debug[0..3]` under debug mode `FFT_FREQ` is the tracker's live centre per
 axis. Reduce it to a histogram over frequency and hang it off the dynamic

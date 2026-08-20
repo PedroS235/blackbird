@@ -47,6 +47,15 @@ impl OverlayFamily {
         Self::Lowpass(FilterLoop::Dterm),
     ];
 
+    /// Position in `ALL` — what a per-family array of visibility flags is
+    /// indexed by, so a new family cannot be silently left out of the menu.
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|&f| f == self)
+            .expect("every family is in ALL")
+    }
+
     /// The menu entry's label.
     pub fn title(self) -> String {
         match self {

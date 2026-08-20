@@ -4,7 +4,7 @@ mod psd;
 mod spectrogram;
 mod vs_reference;
 
-use egui::{Color32, Ui};
+use egui::Ui;
 
 use super::{TabCtx, tab_bar};
 use crate::analysis::SpectralAnalysis;
@@ -12,8 +12,6 @@ use crate::parser::Axis;
 use frequency::Frequency;
 use heatmap_panel::{HeatmapKind, HeatmapPanel};
 use psd::Psd;
-
-pub(super) const PEAK_MARKER_COLOR: Color32 = Color32::from_rgb(255, 215, 0);
 
 /// Here the raw gyro is the whole point — there is no falling back to the
 /// filtered trace, since the comparison between the two is what this tab is.

@@ -1,6 +1,6 @@
 # 08 — Peak label cull, attenuation, out-of-range recolour
 
-Status: todo
+Status: done
 
 - At most the three strongest peaks by amplitude carry a label; the rest are
   unlabelled lines.

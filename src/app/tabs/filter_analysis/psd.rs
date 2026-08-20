@@ -1,13 +1,29 @@
-use egui::{Color32, RichText, Ui, Vec2b};
-use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Span, Text, VLine};
+use egui::{Align2, Color32, RichText, Ui, Vec2b};
+use egui_plot::{Line, Plot, PlotPoint, PlotPoints, PlotUi, Span, Text, VLine};
+use elegance::Palette;
 
-use super::{PEAK_MARKER_COLOR, drawn_axes};
-use crate::analysis::{FilterLoop, OverlayFamily, OverlayShape, SpectralAnalysis};
+use super::drawn_axes;
+use crate::analysis::{
+    AxisSpectral, DynNotchReach, FilterOverlay, FrequencyPeak, HarmonicBand, OverlayFamily,
+    OverlayShape, SpectralAnalysis, TracedCenter,
+};
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
+use crate::app::ui::overlay_menu::{self, OverlayVisibility};
 use crate::parser::{Axis, PerAxis};
 
-const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
+/// How many peaks carry a written label. The rest are drawn as bare lines:
+/// past three the labels overlap each other and the curve underneath, and the
+/// three loudest are the ones a pilot is filtering for anyway.
+const LABELLED_PEAKS: usize = 3;
+
+/// Fill alpha for a band the filter is actually attenuating. Low enough that
+/// the curve reads through a stack of overlapping harmonics.
+const BAND_FILL_ALPHA: u8 = 28;
+
+/// Alpha range of a traced-centre bin, from the frequencies the tracker barely
+/// visited to the one it sat on.
+const TRACE_ALPHA: (f32, f32) = (20.0, 190.0);
 
 /// Keeps an explicit checkbox rather than a legend: the filtered trace is a
 /// conditional build, not a hide, and the panel emits a named marker per
@@ -15,12 +31,23 @@ const FILTER_MARKER_COLOR: Color32 = Color32::from_rgb(140, 160, 255);
 #[derive(Default)]
 pub(super) struct Psd {
     filtered_visible: PerAxis<bool>,
+    overlays: OverlayVisibility,
 }
 
 impl Psd {
     pub(super) fn show(&mut self, ui: &mut Ui, analysis: &SpectralAnalysis) {
+        overlay_menu::show(ui, &mut self.overlays, &analysis.overlays);
+        ui.add_space(4.0);
+
+        // After the menu, and over the axes that draw: measuring first would
+        // size the plots against height the menu row then took.
         let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
         let palette = colors::palette(ui.ctx());
+        let visible: Vec<&FilterOverlay> = analysis
+            .overlays
+            .iter()
+            .filter(|o| self.overlays.shows(o.family))
+            .collect();
 
         for axis in Axis::ALL {
             let Some(spec) = analysis.axis(axis) else {
@@ -32,7 +59,7 @@ impl Psd {
                 ui.checkbox(&mut self.filtered_visible[axis], "show filtered");
             });
 
-            Plot::new(format!("psd_plot_{}", axis.name()))
+            Plot::new(plot_id(axis))
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("dB")
@@ -64,45 +91,313 @@ impl Psd {
                         );
                     }
 
-                    for overlay in analysis.overlays.iter().filter(|o| {
-                        matches!(
-                            o.family,
-                            OverlayFamily::Notch(FilterLoop::Gyro)
-                                | OverlayFamily::Lowpass(FilterLoop::Gyro)
-                                | OverlayFamily::DynNotch
-                        )
-                    }) {
-                        match &overlay.shape {
-                            OverlayShape::Line { hz } => plot_ui.vline(
-                                VLine::new(overlay.label.clone(), *hz).color(FILTER_MARKER_COLOR),
-                            ),
-                            OverlayShape::Band { low_hz, high_hz } => plot_ui.span(
-                                Span::new(overlay.label.clone(), *low_hz..=*high_hz)
-                                    .border_color(FILTER_MARKER_COLOR),
-                            ),
-                            _ => {}
-                        }
+                    for overlay in &visible {
+                        draw_overlay(plot_ui, &palette, overlay, axis);
                     }
-
-                    for peak in &spec.peaks {
-                        let label = match peak.harmonic_of {
-                            Some(_) => format!("{:.0} Hz (harmonic)", peak.freq_hz),
-                            None => format!("{:.0} Hz", peak.freq_hz),
-                        };
-                        plot_ui.vline(
-                            VLine::new(label.clone(), peak.freq_hz).color(PEAK_MARKER_COLOR),
-                        );
-                        plot_ui.text(
-                            Text::new(
-                                format!("{label}_label"),
-                                PlotPoint::new(peak.freq_hz, peak.amplitude_db),
-                                label,
-                            )
-                            .color(PEAK_MARKER_COLOR)
-                            .anchor(egui::Align2::CENTER_BOTTOM),
-                        );
-                    }
+                    draw_peaks(plot_ui, &palette, spec);
                 });
+
+            // Under the plot rather than on it: the verdict has to survive the
+            // pilot zooming the offending peak off screen.
+            if let Some(prose) = out_of_reach_prose(spec, &analysis.overlays) {
+                ui.label(RichText::new(prose).color(palette.warning));
+            }
         }
+    }
+}
+
+/// Renaming this throws away the persisted zoom of every pilot who had one.
+fn plot_id(axis: Axis) -> String {
+    format!("psd_plot_{}", axis.name())
+}
+
+fn draw_overlay(plot_ui: &mut PlotUi<'_>, palette: &Palette, overlay: &FilterOverlay, axis: Axis) {
+    let color = colors::filter_color(palette);
+
+    match &overlay.shape {
+        OverlayShape::Line { hz } => {
+            plot_ui.vline(VLine::new(overlay.label.clone(), *hz).color(color))
+        }
+        OverlayShape::Band { low_hz, high_hz } => plot_ui.span(
+            Span::new(overlay.label.clone(), *low_hz..=*high_hz)
+                .fill(color.gamma_multiply_u8(BAND_FILL_ALPHA))
+                .border_color(color),
+        ),
+        OverlayShape::Harmonics(bands) => draw_harmonics(plot_ui, palette, bands),
+        OverlayShape::Traced(per_axis) => {
+            if let Some(traced) = per_axis[axis].as_ref() {
+                draw_traced(plot_ui, palette, traced, &overlay.label);
+            }
+        }
+    }
+}
+
+/// One band per motor per order, coloured by order. Bands overlap where the
+/// motors agree and fan out where one is working harder, which is itself the
+/// diagnosis. Only the first motor of each order carries the label — twelve
+/// labels would bury the curve they are drawn over.
+fn draw_harmonics(plot_ui: &mut PlotUi<'_>, palette: &Palette, bands: &[HarmonicBand]) {
+    for band in bands {
+        let color = colors::harmonic_color(palette, band.order);
+        // A harmonic the RPM filter tracks but takes nothing off is an outline
+        // with no fill: "the filter is here" is not "the filter is working".
+        let fill = match band.filtered {
+            true => color.gamma_multiply_u8(BAND_FILL_ALPHA),
+            false => Color32::TRANSPARENT,
+        };
+        let label = match band.motor {
+            0 => format!("H{}", band.order),
+            _ => String::new(),
+        };
+
+        plot_ui.span(
+            Span::new(label, band.low_hz..=band.high_hz)
+                .fill(fill)
+                .border_color(color),
+        );
+    }
+}
+
+/// Where the tracker actually sat, as time spent per frequency: opacity is the
+/// share of the analysed window. A tracker pinned at one end of its range for
+/// half the flight is one solid bar, which no single number could say.
+fn draw_traced(plot_ui: &mut PlotUi<'_>, palette: &Palette, traced: &TracedCenter, label: &str) {
+    let peak = traced.weight.iter().copied().fold(0.0, f64::max);
+    if peak <= 0.0 {
+        return;
+    }
+    let width = traced.freq_hz.windows(2).map(|w| w[1] - w[0]).next();
+    let (half, color) = (
+        width.unwrap_or(1.0) / 2.0,
+        colors::filter_color(palette).to_opaque(),
+    );
+    let (min_alpha, max_alpha) = TRACE_ALPHA;
+
+    for (&freq, &weight) in traced.freq_hz.iter().zip(&traced.weight) {
+        if weight <= 0.0 {
+            continue;
+        }
+        let alpha = min_alpha + (max_alpha - min_alpha) * (weight / peak) as f32;
+        // The label goes on the bin the tracker spent longest in, so that the
+        // one mark saying "traced" sits on the reading that matters.
+        let name = match weight == peak {
+            true => label.to_string(),
+            false => String::new(),
+        };
+
+        plot_ui.span(
+            Span::new(name, freq - half..=freq + half)
+                .fill(color.gamma_multiply_u8(alpha as u8))
+                .border_color(Color32::TRANSPARENT),
+        );
+    }
+}
+
+/// One mark per peak, and a label on the loudest few. A peak the dynamic notch
+/// can never reach takes the warning colour.
+fn draw_peaks(plot_ui: &mut PlotUi<'_>, palette: &Palette, spec: &AxisSpectral) {
+    let mut by_amplitude: Vec<usize> = (0..spec.peaks.len()).collect();
+    by_amplitude.sort_by(|&a, &b| {
+        spec.peaks[b]
+            .amplitude_db
+            .total_cmp(&spec.peaks[a].amplitude_db)
+    });
+    by_amplitude.truncate(LABELLED_PEAKS);
+
+    for (i, peak) in spec.peaks.iter().enumerate() {
+        let out_of_reach = peak.dyn_notch_reach.is_some_and(DynNotchReach::is_outside);
+        let color = match out_of_reach {
+            true => palette.warning,
+            false => colors::peak_color(palette),
+        };
+        let label = peak_label(peak);
+
+        plot_ui.vline(VLine::new(label.clone(), peak.freq_hz).color(color));
+
+        if by_amplitude.contains(&i) {
+            plot_ui.text(
+                Text::new(
+                    format!("{label}_label"),
+                    PlotPoint::new(peak.freq_hz, peak.amplitude_db),
+                    label,
+                )
+                .color(color)
+                .anchor(Align2::CENTER_BOTTOM),
+            );
+        }
+    }
+}
+
+/// The attenuation is a number the analysis has always computed and the panel
+/// has never shown — it is how a pilot judges the filter chain without reading
+/// a second plot.
+fn peak_label(peak: &FrequencyPeak) -> String {
+    let harmonic = match peak.harmonic_of {
+        Some(_) => " (harmonic)",
+        None => "",
+    };
+    let attenuation = match peak.attenuated_db {
+        Some(db) => format!(" · {:.0} dB filtered", -db),
+        None => String::new(),
+    };
+
+    format!("{:.0} Hz{harmonic}{attenuation}", peak.freq_hz)
+}
+
+/// The count and the bound it exceeded, stated in words. Prose under a plot
+/// for what the plot cannot hold is the idiom the step response panel uses.
+fn out_of_reach_prose(spec: &AxisSpectral, overlays: &[FilterOverlay]) -> Option<String> {
+    let (low_hz, high_hz) = dyn_notch_range(overlays)?;
+    let count = |reach| {
+        spec.peaks
+            .iter()
+            .filter(|p| p.dyn_notch_reach == Some(reach))
+            .count()
+    };
+
+    let clauses: Vec<String> = [
+        (count(DynNotchReach::AboveMax), "above", high_hz),
+        (count(DynNotchReach::BelowMin), "below", low_hz),
+    ]
+    .into_iter()
+    .filter(|&(n, _, _)| n > 0)
+    .map(|(n, side, bound)| {
+        let peaks = match n {
+            1 => "peak sits",
+            _ => "peaks sit",
+        };
+        format!("{n} {peaks} {side} the dynamic notch's {bound:.0} Hz")
+    })
+    .collect();
+
+    (!clauses.is_empty()).then(|| {
+        format!(
+            "{} — the tracker can never reach them.",
+            clauses.join(", and ")
+        )
+    })
+}
+
+/// The configured range, read back off the overlay that carries it rather than
+/// re-plumbed from the header — the band drawn and the prose written have to
+/// be the same claim.
+fn dyn_notch_range(overlays: &[FilterOverlay]) -> Option<(f64, f64)> {
+    overlays
+        .iter()
+        .filter(|o| o.family == OverlayFamily::DynNotch)
+        .find_map(|o| match o.shape {
+            OverlayShape::Band { low_hz, high_hz } => Some((low_hz, high_hz)),
+            _ => None,
+        })
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Renaming a plot id silently throws away the persisted zoom of every
+    /// pilot who had one.
+    #[test]
+    fn plot_ids_are_stable() {
+        assert_eq!(plot_id(Axis::Roll), "psd_plot_roll");
+        assert_eq!(plot_id(Axis::Yaw), "psd_plot_yaw");
+    }
+
+    /// The panel opens as a clean spectrum — nothing is drawn over the curve
+    /// that the pilot did not ask for.
+    #[test]
+    fn overlays_start_hidden() {
+        let panel = Psd::default();
+        assert!(
+            OverlayFamily::ALL
+                .iter()
+                .all(|&family| !panel.overlays.shows(family))
+        );
+    }
+
+    fn peak(freq_hz: f64, reach: Option<DynNotchReach>) -> FrequencyPeak {
+        FrequencyPeak {
+            freq_hz,
+            amplitude_db: 40.0,
+            harmonic_of: None,
+            attenuated_db: Some(7.0),
+            dyn_notch_reach: reach,
+        }
+    }
+
+    fn spectral_with(peaks: Vec<FrequencyPeak>) -> AxisSpectral {
+        use crate::signal::fft::Psd as PsdData;
+        let empty = || PsdData {
+            freq_hz: Vec::new().into(),
+            power_db: Vec::new(),
+        };
+        AxisSpectral {
+            raw_psd: empty(),
+            filtered_psd: None,
+            raw_spectrum: crate::signal::fft::Spectrum {
+                freq_hz: Vec::new().into(),
+                magnitude: Vec::new(),
+            },
+            filtered_spectrum: None,
+            throttle_map: None,
+            time_map: None,
+            peaks,
+            noise_floor_db: 0.0,
+        }
+    }
+
+    fn dyn_notch_overlay() -> Vec<FilterOverlay> {
+        vec![FilterOverlay {
+            label: "Dyn notch range".to_string(),
+            family: OverlayFamily::DynNotch,
+            shape: OverlayShape::Band {
+                low_hz: 90.0,
+                high_hz: 400.0,
+            },
+        }]
+    }
+
+    #[test]
+    fn the_prose_names_the_bound_the_peaks_exceeded() {
+        let spec = spectral_with(vec![
+            peak(600.0, Some(DynNotchReach::AboveMax)),
+            peak(700.0, Some(DynNotchReach::AboveMax)),
+            peak(200.0, Some(DynNotchReach::Inside)),
+        ]);
+
+        let prose = out_of_reach_prose(&spec, &dyn_notch_overlay()).expect("two peaks are out");
+        assert!(
+            prose.starts_with("2 peaks sit above the dynamic notch's 400 Hz"),
+            "{prose}"
+        );
+    }
+
+    #[test]
+    fn a_single_peak_below_the_minimum_reads_as_one() {
+        let spec = spectral_with(vec![peak(50.0, Some(DynNotchReach::BelowMin))]);
+
+        let prose = out_of_reach_prose(&spec, &dyn_notch_overlay()).expect("one peak is out");
+        assert!(
+            prose.starts_with("1 peak sits below the dynamic notch's 90 Hz"),
+            "{prose}"
+        );
+    }
+
+    /// Nothing out of reach, nothing said — and with no dynamic notch there is
+    /// no claim to make at all.
+    #[test]
+    fn no_prose_without_something_to_report() {
+        let inside = spectral_with(vec![peak(200.0, Some(DynNotchReach::Inside))]);
+        assert_eq!(out_of_reach_prose(&inside, &dyn_notch_overlay()), None);
+
+        let unconfigured = spectral_with(vec![peak(600.0, None)]);
+        assert_eq!(out_of_reach_prose(&unconfigured, &[]), None);
+    }
+
+    /// The number a pilot judges the filter chain by, which the panel has
+    /// never shown.
+    #[test]
+    fn a_labelled_peak_states_what_the_filters_took_off_it() {
+        assert_eq!(peak_label(&peak(212.0, None)), "212 Hz · -7 dB filtered");
     }
 }

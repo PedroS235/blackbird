@@ -1,6 +1,6 @@
 # 02 — Replace `FilterMarker` with the overlay type
 
-Status: todo
+Status: done
 
 `FilterMarker` is a line: label, centre, optional cutoff. Every filter that has
 width is drawn as a guess at a midpoint, and the PSD panel selects gyro-only

@@ -5,7 +5,9 @@ pub mod step_response;
 pub use overlays::{
     FilterLoop, FilterOverlay, HarmonicBand, OverlayFamily, OverlayShape, TracedCenter,
 };
-pub use spectral::{DynNotchReach, GyroNoiseAnalyzer, SpectralAnalysis};
+pub use spectral::{
+    AxisSpectral, DynNotchReach, FrequencyPeak, GyroNoiseAnalyzer, SpectralAnalysis,
+};
 pub use step_response::{
     AxisStepResponse, NoStepResponse, StepMetrics, StepResponseAnalysis, StepResponseAnalyzer,
 };

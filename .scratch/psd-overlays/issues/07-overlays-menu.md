@@ -1,6 +1,6 @@
 # 07 — The overlays menu and per-family rendering
 
-Status: todo
+Status: done
 
 - A dropdown above the plots, one section per family, every family off by
   default. Costs no vertical space closed.

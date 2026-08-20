@@ -1,6 +1,6 @@
 # 01 — Decode `eRPM`, add the RPM channel
 
-Status: todo
+Status: done
 
 `FlightData::rpm` is declared, hardcoded empty and never read. Make it real.
 

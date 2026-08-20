@@ -62,11 +62,12 @@ src/
 │
 ├── parser/
 │   ├── mod.rs               ← re-exports, wraps blackbox-log crate
-│   ├── header.rs            ← HeaderData struct (PIDs, filters, rates, craft name)
+│   ├── metadata.rs          ← Metadata struct (filters, rates, craft name, raw headers)
 │   └── timeseries.rs        ← GyroTimeseries, RcCommandTimeseries, MotorTimeseries
 │
 ├── analysis/
-│   ├── mod.rs               ← AnalysisResult struct, orchestrates the three analysers
+│   ├── mod.rs               ← Analysis struct, orchestrates the analysers
+│   ├── overlays.rs          ← filter geometry: bands, harmonic groups, traced centre
 │   ├── spectral.rs          ← FFT, Hann windowing, throttle-binned spectral analysis
 │   ├── step_response.rs     ← Wiener deconvolution, windowing, averaging
 │   └── filter_delay.rs      ← cross-correlation, delay estimation in ms
@@ -75,7 +76,7 @@ src/
 │   ├── mod.rs               ← LlmBackend trait
 │   ├── anthropic.rs         ← Anthropic API client via reqwest
 │   ├── ollama.rs            ← local model fallback
-│   └── prompt.rs            ← prompt builder from AnalysisResult + HeaderData
+│   └── prompt.rs            ← prompt builder from Analysis + Metadata
 │
 └── ui/
     ├── mod.rs
@@ -92,30 +93,40 @@ src/
 
 ## Key data structures
 
-### HeaderData
+### Metadata
 
-Extracted from the ASCII header at the top of every blackbox log.
-Contains everything the AI needs as context for its starting point.
+Extracted from the ASCII header at the top of every blackbox log. Lives in
+`parser::metadata`. **PIDs are not parsed** — they sit unread in
+`raw_headers`, which is also where `motor_poles` is read from.
 
 ```rust
-pub struct HeaderData {
+pub struct Metadata {
+    pub file_name: String,
     pub craft_name: String,
-    pub firmware_version: String,
+    pub firmware: String,
     pub board: String,
-    pub sample_rate_hz: f32,      // critical — all time/freq calculations depend on this
+    pub looptime_us: Option<u32>,
+    pub duration: Duration,
+    pub filters: FilterConfig,      // see below
+    pub rates: Option<RateConfig>,  // None where the log records no rate curve
+    pub debug_mode: String,         // e.g. "FFT_FREQ"
+    pub raw_headers: HashMap<String, String>,
+}
 
-    // PID values — what the pilot had when they flew
-    pub pid_roll:  [f32; 3],      // [P, I, D]
-    pub pid_pitch: [f32; 3],
-    pub pid_yaw:   [f32; 3],
-
-    // Filter settings
-    pub gyro_lpf_hz: f32,
-    pub dterm_lpf_hz: f32,
-    pub rpm_filter_enabled: bool,
-    pub notch_filters: Vec<NotchFilter>,
+pub struct FilterConfig {
+    pub gyro_lpf1: Option<LowpassConfig>,        // static, or a dynamic min..max
+    pub gyro_lpf2: Option<StaticLowpassConfig>,
+    pub dterm_lpf1: Option<DtermLowpass1Config>,
+    pub dterm_lpf2: Option<StaticLowpassConfig>,
+    pub gyro_notches: Vec<NotchConfig>,          // { center_hz, cutoff_hz }
+    pub dterm_notches: Vec<NotchConfig>,
+    pub dyn_notch: Option<DynNotchConfig>,       // { min_hz, max_hz, count, q }
+    pub rpm_filter: Option<RpmFilterConfig>,     // { harmonics, min_hz, q, weights, … }
 }
 ```
+
+The sample rate is not here — it is measured from the timestamps and lives on
+`FlightData`, so a log whose looptime header lies is still analysed correctly.
 
 ### PlotState
 
@@ -134,17 +145,38 @@ pub struct PlotState {
 The single struct that drives both the UI and the AI prompt.
 The AI never sees raw timeseries — only computed metrics.
 
+Implemented as `analysis::Analysis`; a new analyser adds a field here rather
+than another `Vec` to the loader, the log store and the tab context.
+
 ```rust
-pub struct AnalysisResult {
-    pub spectral:      [SpectralResult; 3],     // per axis: roll, pitch, yaw
-    pub step_response: StepResponseAnalysis,   // per axis, see below
-    pub filter_delay:  FilterDelayResult,
+pub struct Analysis {
+    pub spectral: SpectralAnalysis,
+    pub step:     StepResponseAnalysis,
+    // filter delay lands here
 }
 
-pub struct SpectralResult {
-    pub noise_floor_db: f32,
-    pub peaks: Vec<FrequencyPeak>,              // { freq_hz, amplitude_db }
-    pub throttle_map: ndarray::Array2<f32>,     // throttle_bin × freq → dB
+pub struct SpectralAnalysis {
+    axes: PerAxis<Option<AxisSpectral>>,   // None where the axis had no gyroUnfilt
+    pub overlays: Vec<FilterOverlay>,      // filter geometry, see below
+}
+
+pub struct AxisSpectral {
+    pub raw_psd: Psd,
+    pub filtered_psd: Option<Psd>,
+    pub raw_spectrum: Spectrum,
+    pub filtered_spectrum: Option<Spectrum>,
+    pub throttle_map: Option<BinnedSpectrum>,   // throttle bin × freq → dB
+    pub time_map: Option<BinnedSpectrum>,       // the spectrogram
+    pub peaks: Vec<FrequencyPeak>,
+    pub noise_floor_db: f64,                    // computed, still undisplayed
+}
+
+pub struct FrequencyPeak {
+    pub freq_hz: f64,
+    pub amplitude_db: f64,
+    pub harmonic_of: Option<usize>,             // index of its fundamental
+    pub attenuated_db: Option<f64>,             // raw − filtered at this bin
+    pub dyn_notch_reach: Option<DynNotchReach>, // Inside / BelowMin / AboveMax
 }
 
 // Implemented as `analysis::step_response::AxisStepResponse`. No settling
@@ -182,6 +214,35 @@ pub struct FilterDelayResult {
 - Formula: `amplitude_db = 20.0 * log10(magnitude)`
 - Input signal: `gyro_raw` (pre-filter gyro, not post-filter)
 - Analysed over `FlightData::trimmed(trim_s)`, not the whole log — see below
+
+### Filter overlay geometry
+
+`analysis::overlays` computes what each filter actually occupies in frequency,
+at load time, stored on `Analysis`. It is not a pure function the panel calls
+per frame: the geometry depends on the analysed window, which is fixed at
+load, and storing it puts the feature behind the loader integration seam.
+
+- One `FilterOverlay { label, family, shape }`. `OverlayFamily` carries the
+  gyro/D-term loop, so a panel selects gyro overlays by matching the type
+  rather than by `label.starts_with("Gyro")`
+- `OverlayShape::Line` — a fixed lowpass corner, the only filter with no width
+- `OverlayShape::Band` — a notch's −3 dB width (`centre / Q`, with Q derived
+  from centre and cutoff as Betaflight's `filterGetNotchQ` does), a dynamic
+  lowpass's swept range, or the dynamic notch's configured range. A dynamic
+  filter drawn at one nominal centre is a guess at a frequency it never sat at
+- `OverlayShape::Harmonics` — one band per motor per order, from `eRPM`, over
+  the frequencies that motor actually reached. Order count comes from
+  `RpmFilterConfig::harmonics`; a zero-weight order is flagged unfiltered.
+  Stopped-motor samples are excluded, so no band runs down to 0 Hz
+- `OverlayShape::Traced` — where the dynamic notch tracker actually sat, as a
+  histogram over frequency, per axis. Read from `debug[0..3]`, gated on
+  `Metadata::logs_dyn_notch_trace()` (debug mode `FFT_FREQ`) — the one rule,
+  shared with the Spectrogram sub-tab's overlay
+- `eRPM` → Hz is `erpm * 100 / (poles / 2) / 60`. `motor_poles` comes from the
+  raw header passthrough, defaulting to Betaflight's 14
+- Overlay visibility is UI state (`ui::overlay_menu::OverlayVisibility`), a
+  shared type with a separate instance per sub-tab, every family off by
+  default. Toggling one never recomputes anything
 
 ### Step response
 
@@ -265,7 +326,7 @@ What gets sent to the model. Structured, not raw timeseries.
 
 ```rust
 pub struct TuneContext {
-    pub header: HeaderData,         // current PID/filter values, craft info
+    pub header: Metadata,           // current filter values, craft info
     pub analysis: AnalysisResult,   // computed metrics
     pub pilot_notes: Option<String> // free text from the pilot ("prop wash on fast turns")
 }
@@ -301,7 +362,7 @@ This is the killer feature — not just diagnosis but ready-to-paste commands.
 Goal: load a log, see the data. Validate the full parser → UI pipeline.
 
 - [ ] Project setup — `cargo new blackbird`, add dependencies
-- [ ] `parser/` — wrap `blackbox-log`, extract `HeaderData` and timeseries
+- [x] `parser/` — wrap `blackbox-log`, extract `Metadata` and timeseries
 - [ ] `app.rs` — file drag-and-drop, log store
 - [ ] `ui/panels/log_info.rs` — header viewer
 - [ ] `ui/panels/timeseries.rs` — raw gyro/rc/motor plot with egui_plot
@@ -350,7 +411,9 @@ _(none yet — project is in initial setup)_
 | `PlotState` lives in `app.rs`, passed to all panels | Future panels (spectral, step response) share the same time range and cursor |
 | Flights are named by `LogId`, never by index | `LogStore::remove` shifts every later index, and panel state the store cannot see would then redraw a different file under the old label |
 | Panels reach other flights through a read-only catalog on `TabCtx` | A panel handed `&LogStore` could `select` or `remove` mid-frame while the sidepanel iterates it |
-| One colour module (`app/colors.rs`) for axes and compare slots | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
+| Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
+| Overlays default to off, behind one dropdown | The panel opens as a clean spectrum. Every mark over the curve is one the pilot asked for, and a closed dropdown costs none of the vertical space three stacked axes need |
+| One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
 | AI as trait with two backends | Anthropic for quality, Ollama for offline/privacy. Swappable at runtime |
 | `prompt.rs` isolated from API plumbing | Prompt is a product decision iterated independently of transport code |
 

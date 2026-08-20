@@ -1,6 +1,6 @@
 # 05 — Out-of-range peak classification
 
-Status: todo
+Status: done
 
 A peak outside the dynamic notch's configured range is noise the tracker can
 never touch. Decided in analysis, not in the panel.

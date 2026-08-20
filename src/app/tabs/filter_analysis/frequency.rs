@@ -2,7 +2,7 @@ use egui::{RichText, Ui, Vec2b};
 use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 use elegance::Slider;
 
-use super::{PEAK_MARKER_COLOR, drawn_axes};
+use super::drawn_axes;
 use crate::analysis::SpectralAnalysis;
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
@@ -70,14 +70,14 @@ impl Frequency {
                         &raw_spectrum.magnitude,
                         self.peak_min_hz as f64,
                     ) {
-                        plot_ui.vline(VLine::new("max", freq).color(PEAK_MARKER_COLOR));
+                        plot_ui.vline(VLine::new("max", freq).color(colors::peak_color(&palette)));
                         plot_ui.text(
                             Text::new(
                                 "max_label",
                                 PlotPoint::new(freq, mag),
                                 format!("{freq:.0} Hz"),
                             )
-                            .color(PEAK_MARKER_COLOR)
+                            .color(colors::peak_color(&palette))
                             .anchor(egui::Align2::CENTER_BOTTOM),
                         );
                     }

@@ -1,6 +1,6 @@
 # 06 — Overlay colours into the colour module
 
-Status: todo
+Status: done
 
 `PEAK_MARKER_COLOR` and `FILTER_MARKER_COLOR` are hardcoded per panel and do
 not follow the theme — the exact defect `app/colors.rs` exists to prevent.

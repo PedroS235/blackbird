@@ -1,6 +1,6 @@
 # Spec: overlay menu for the PSD panel
 
-Status: ready-for-agent
+Status: implemented
 
 ## Problem Statement
 
