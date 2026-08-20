@@ -149,3 +149,18 @@ jobs:
             artifacts/blackbird-${{ github.ref_name }}-macos-arm64
             artifacts/blackbird-${{ github.ref_name }}-windows-x86_64.exe
             artifacts/blackbird-${{ github.ref_name }}-windows-arm64.exe
+
+      # The notes, set by the API rather than inferred. softprops left the body
+      # empty across two runs even with body_path and body both set explicitly,
+      # and its own update path (`body = workflowBody || existingBody`) says it
+      # should not have — so the body is no longer its job. This step fails
+      # loudly if the write is refused.
+      - name: Notes onto the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --notes-file notes.md
+          gh release view "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" --json body --jq '.body' | head -20
