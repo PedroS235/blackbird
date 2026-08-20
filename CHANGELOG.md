@@ -1,3 +1,21 @@
+## [unreleased]
+
+### 🚀 Features
+
+- *(analysis)* Overlay geometry for what the filters actually do
+- *(psd)* An overlays menu, and overlays drawn as what they do
+- *(psd)* Peaks get a switch, and default off with everything else
+- *(psd)* Draw the dynamic notch as the V it actually is
+- *(psd)* Static notches and every lowpass draw their real response too
+
+### 🐛 Bug Fixes
+
+- *(psd)* Review findings on the overlays work
+- *(psd)* Lay the overlay toggles out inline instead of behind a button
+
+### ⚙️ Miscellaneous Tasks
+
+- Generate changelog
 ## [0.6.0] - 2026-08-19
 
 ### 🚀 Features
