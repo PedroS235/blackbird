@@ -115,6 +115,15 @@ jobs:
             {%- endfor %}
             {% endfor -%}
 
+      # Loud on an empty or missing notes.md: softprops falls back silently
+      # when body_path cannot be read, and a release with no notes at all is
+      # what that silence looks like.
+      - name: Notes are not empty
+        run: |
+          ls -l notes.md
+          test -s notes.md
+          cat notes.md
+
       # The whole history, shipped as an asset. Nothing tracks CHANGELOG.md in
       # the repo: it is derived from the commits, and a generated file in the
       # tree only ever drifts from the tag it claims to describe.
@@ -127,7 +136,11 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # Both: body_path is preferred, and body is what it falls back to if
+          # the file cannot be read. Either way the notes are explicitly set,
+          # so an existing release cannot quietly keep its old ones.
           body_path: notes.md
+          body: ${{ steps.notes.outputs.content }}
           files: |
             CHANGELOG.md
             artifacts/blackbird-${{ github.ref_name }}-linux-x86_64
