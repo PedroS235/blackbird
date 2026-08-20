@@ -1,4 +1,4 @@
-## [unreleased]
+## [0.8.0] - 2026-08-20
 
 ### 🚀 Features
 
@@ -7,6 +7,7 @@
 - *(psd)* Peaks get a switch, and default off with everything else
 - *(psd)* Draw the dynamic notch as the V it actually is
 - *(psd)* Static notches and every lowpass draw their real response too
+- *(update)* Offer the release built for this platform
 
 ### 🐛 Bug Fixes
 
