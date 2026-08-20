@@ -75,6 +75,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Every tag, not just this one: git-cliff walks the tag graph to work out
+      # where a release starts, and a shallow clone hands it an empty section.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -90,9 +96,40 @@ jobs:
           mv artifacts/blackbird-x86_64-pc-windows-msvc/blackbird.exe  artifacts/blackbird-${VERSION}-windows-x86_64.exe
           mv artifacts/blackbird-aarch64-pc-windows-msvc/blackbird.exe artifacts/blackbird-${VERSION}-windows-arm64.exe
 
+      # The body override drops the `## [x.y.z] - date` heading that cliff.toml
+      # renders for the file — GitHub already titles the release with the tag.
+      # Everything else (groups, parsers, filters) still comes from cliff.toml.
+      - name: Release notes for this tag
+        id: notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest
+        env:
+          OUTPUT: notes.md
+          GIT_CLIFF__CHANGELOG__BODY: |
+            {%- for group, commits in commits | group_by(attribute="group") %}
+            ### {{ group | striptags | trim | upper_first }}
+            {% for commit in commits %}
+            - {% if commit.scope %}*({{ commit.scope }})* {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | upper_first }}
+            {%- endfor %}
+            {% endfor -%}
+
+      # The whole history, shipped as an asset. Nothing tracks CHANGELOG.md in
+      # the repo: it is derived from the commits, and a generated file in the
+      # tree only ever drifts from the tag it claims to describe.
+      - name: Full changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+        env:
+          OUTPUT: CHANGELOG.md
+
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: notes.md
           files: |
+            CHANGELOG.md
             artifacts/blackbird-${{ github.ref_name }}-linux-x86_64
             artifacts/blackbird-${{ github.ref_name }}-linux-arm64
             artifacts/blackbird-${{ github.ref_name }}-macos-x86_64

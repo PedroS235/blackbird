@@ -369,6 +369,27 @@ on startup, on a plain `std::thread` — `blackbird::version` does the compare,
   releases, and every user would have been told forever that an update was
   waiting
 
+### Releases
+
+Pushing a `v*` tag runs `release.yml`: `verify` (tag against `Cargo.toml`) →
+six target builds → `release`. Releasing is therefore: bump `Cargo.toml`,
+commit, tag, push. Nothing else is done by hand.
+
+- **The release notes and the changelog are generated at release time**, by
+  git-cliff from the commits, off a `fetch-depth: 0` checkout — a shallow clone
+  has no tag graph and cliff would emit an empty section
+- `CHANGELOG.md` is **not tracked** (it is in `.gitignore`) and ships as a
+  release asset. It is derived from the commits, so a copy in the tree only ever
+  drifts from the tag it claims to describe, and regenerating it by hand is a
+  step that gets forgotten
+- The notes body overrides only cliff.toml's `body`, dropping the
+  `## [x.y.z] - date` heading — GitHub already titles the release with the tag.
+  Groups, parsers and filters still come from `cliff.toml`, so the file and the
+  notes can never disagree about what a `fix(psd):` is
+- Which means **the commit subject is the release note**. A subject without a
+  conventional prefix is dropped from the notes entirely (`filter_commits`), and
+  the scope in `feat(psd):` is what the pilot reads on the Releases page
+
 ## AI integration
 
 ### LlmBackend trait
@@ -480,6 +501,7 @@ _(none yet — project is in initial setup)_
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
 | Update check offers a download, never self-replaces | Assets are unsigned bare binaries and the install source is unknowable — a self-updater would fight Gatekeeper, a running `.exe`, and package managers, with nothing to verify the download against |
 | `ureq` + rustls for the update check, not `reqwest` | One blocking GET does not justify pulling in a tokio runtime, and rustls keeps the single binary free of a libssl dynamic link |
+| Changelog generated at release time, not tracked | It is derived from the commits. A generated file in the tree drifts from the tag it describes, and regenerating it by hand was a step that got skipped — the 0.7.0 release shipped with its section still headed `[unreleased]` |
 | Tag-vs-`Cargo.toml` gate as the first CI job | The version the binary reports is what the update check compares; drift makes it lie to every user. Fails in seconds instead of after six matrix builds |
 | AI as trait with two backends | Anthropic for quality, Ollama for offline/privacy. Swappable at runtime |
 | `prompt.rs` isolated from API plumbing | Prompt is a product decision iterated independently of transport code |
