@@ -382,6 +382,10 @@ commit, tag, push. Nothing else is done by hand.
   release asset. It is derived from the commits, so a copy in the tree only ever
   drifts from the tag it claims to describe, and regenerating it by hand is a
   step that gets forgotten
+- The notes are written by `gh release edit --notes-file`, not by the upload
+  action, which left the body empty across three runs with `body_path` and
+  `body` both set. The upload action ships the binaries; the notes are a
+  separate, verifiable write
 - The notes body overrides only cliff.toml's `body`, dropping the
   `## [x.y.z] - date` heading — GitHub already titles the release with the tag.
   Groups, parsers and filters still come from `cliff.toml`, so the file and the

@@ -136,11 +136,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          # Both: body_path is preferred, and body is what it falls back to if
-          # the file cannot be read. Either way the notes are explicitly set,
-          # so an existing release cannot quietly keep its old ones.
-          body_path: notes.md
-          body: ${{ steps.notes.outputs.content }}
           files: |
             CHANGELOG.md
             artifacts/blackbird-${{ github.ref_name }}-linux-x86_64
