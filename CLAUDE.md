@@ -58,35 +58,40 @@ FPV language: looptime, P/D balance, prop wash, notch filters, RPM filtering.
 ```
 src/
 ├── main.rs                  ← entry point, initialise eframe
-├── app.rs                   ← App struct, central state, file drop handling
+├── lib.rs                   ← the library half: everything but the UI
+├── loader.rs                ← paths in, parsed-and-analysed logs out
 │
 ├── parser/
-│   ├── mod.rs               ← re-exports, wraps blackbox-log crate
-│   ├── metadata.rs          ← Metadata struct (filters, rates, craft name, raw headers)
-│   └── timeseries.rs        ← GyroTimeseries, RcCommandTimeseries, MotorTimeseries
+│   ├── mod.rs               ← wraps blackbox-log, field detection, header decode
+│   ├── metadata.rs          ← Metadata + FilterConfig, RateConfig, pole count
+│   ├── flight_data.rs       ← FlightData, Channel, Axis, PerAxis, Trimmed
+│   └── sample_rate.rs       ← sample rate estimated from the timestamps
+│
+├── signal/                  ← FFT, Welch passes, deconvolution, downsampling
 │
 ├── analysis/
 │   ├── mod.rs               ← Analysis struct, orchestrates the analysers
 │   ├── overlays.rs          ← filter geometry: bands, harmonic groups, traced centre
-│   ├── spectral.rs          ← FFT, Hann windowing, throttle-binned spectral analysis
+│   ├── spectral.rs          ← PSD, peaks, throttle/time-binned maps
 │   ├── step_response.rs     ← Wiener deconvolution, windowing, averaging
-│   └── filter_delay.rs      ← cross-correlation, delay estimation in ms
+│   └── filter_delay.rs      ← cross-correlation, delay estimation in ms (planned)
 │
-├── ai/
-│   ├── mod.rs               ← LlmBackend trait
-│   ├── anthropic.rs         ← Anthropic API client via reqwest
-│   ├── ollama.rs            ← local model fallback
-│   └── prompt.rs            ← prompt builder from Analysis + Metadata
+├── ai/                      ← planned; see the AI integration section
 │
-└── ui/
-    ├── mod.rs
-    └── panels/
-        ├── timeseries.rs    ← raw signal viewer (milestone 1)
-        ├── log_info.rs      ← header viewer: craft, firmware, PIDs, filters
-        ├── spectral.rs      ← FFT heatmap panel (milestone 2)
-        ├── step_response.rs ← step response curve panel (milestone 2)
-        ├── filter_delay.rs  ← filter delay readout (milestone 2)
-        └── ai_panel.rs      ← streaming AI response panel (milestone 3)
+└── app/
+    ├── mod.rs               ← App struct, central state, load events
+    ├── colors.rs            ← axis, compare-slot and overlay palettes
+    ├── log_store.rs         ← LogId, FlightKey, the read-only FlightCatalog
+    ├── sidepanel.rs         ← file list and selection
+    ├── ui/                  ← widgets shared across tabs
+    │   ├── compare.rs       ← compare chips and picker
+    │   ├── heatmap.rs       ← heatmap rendering
+    │   ├── overlay_menu.rs  ← which overlay families a panel is drawing
+    │   └── timeseries_plot.rs
+    └── tabs/
+        ├── timeseries/      ← gyro, power/battery, RSSI
+        ├── filter_analysis/ ← PSD, Frequency, Vs Reference, Spectrogram
+        └── pid_analysis/    ← step response, gyro vs setpoint
 ```
 
 ---

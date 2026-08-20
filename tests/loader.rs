@@ -118,6 +118,9 @@ fn a_fixtures_motors_become_harmonic_bands_at_their_own_frequencies() {
 /// A harmonic whose RPM filter weight is zero is tracked and not attenuated,
 /// and the geometry has to say which is which. One of the `.bbl` fixture's
 /// eight flights was flown on weights `100,0,80`.
+///
+/// Ignored by default: parsing all eight is slow, same as the sibling `.bbl`
+/// tests. The flag itself is covered fast in `analysis::overlays`.
 #[test]
 #[ignore]
 fn a_zero_weight_harmonic_is_marked_unfiltered_end_to_end() {
@@ -172,6 +175,11 @@ fn a_fft_freq_fixture_carries_both_the_configured_range_and_the_traced_centre() 
 /// The negative case: flown in another debug mode, `debug[0..3]` is something
 /// else, and the overlay degrades to the configured range rather than
 /// disappearing.
+///
+/// Ignored by default for the same reason as its siblings — the `.bbl` is
+/// 17 MB across eight flights. `analysis::overlays` asserts the same rule on
+/// a constructed log, so the behaviour is not uncovered in CI, only its
+/// end-to-end path.
 #[test]
 #[ignore]
 fn a_log_flown_in_another_debug_mode_still_gets_the_configured_range() {

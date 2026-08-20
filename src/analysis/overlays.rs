@@ -27,8 +27,9 @@ impl FilterLoop {
     }
 }
 
-/// One section of the overlays menu. Every overlay belongs to exactly one, and
-/// the pilot toggles the family rather than the individual line.
+/// What kind of filter an overlay describes, and which loop it feeds. The
+/// panel toggles by family; what a family is *called* is the panel's business,
+/// not this module's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayFamily {
     Harmonics,
@@ -46,39 +47,6 @@ impl OverlayFamily {
         Self::Lowpass(FilterLoop::Gyro),
         Self::Lowpass(FilterLoop::Dterm),
     ];
-
-    /// Position in `ALL` — what a per-family array of visibility flags is
-    /// indexed by, so a new family cannot be silently left out of the menu.
-    pub fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|&f| f == self)
-            .expect("every family is in ALL")
-    }
-
-    /// The menu entry's label.
-    pub fn title(self) -> String {
-        match self {
-            Self::Harmonics => "Motor harmonics".to_string(),
-            Self::DynNotch => "Dynamic notch".to_string(),
-            Self::Notch(l) => format!("{} notches", l.name()),
-            Self::Lowpass(l) => format!("{} lowpass", l.name()),
-        }
-    }
-
-    /// Why the entry is greyed out. A control the log cannot fill says what
-    /// the log is missing rather than vanishing.
-    pub fn unavailable_reason(self) -> &'static str {
-        match self {
-            Self::Harmonics => {
-                "This log has no eRPM. Motor harmonics are computed from the RPM the ESCs \
-                 report back, which needs bidirectional DShot (`set dshot_bidir = ON`)."
-            }
-            Self::DynNotch => "No dynamic notch was configured on this flight.",
-            Self::Notch(_) => "No static notch was enabled on this flight.",
-            Self::Lowpass(_) => "No lowpass stage was configured on this flight.",
-        }
-    }
 }
 
 /// One motor's noise at one harmonic order, over the frequencies it actually
@@ -105,6 +73,9 @@ pub struct TracedCenter {
     pub freq_hz: Vec<f64>,
     /// Fraction of the analysed window spent in each bin, summing to 1.
     pub weight: Vec<f64>,
+    /// How wide each bin is. Carried rather than left to be re-derived from
+    /// the spacing of `freq_hz`, which is the same number computed twice.
+    pub bin_width_hz: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -250,7 +221,11 @@ fn histogram(samples: &[f64], low_hz: f64, high_hz: f64) -> Option<TracedCenter>
 
     let mut counts = vec![0.0; TRACE_BINS];
     let mut total = 0.0;
+    // Zero is the channel before the tracker has run, not a centre it chose.
     for &v in samples.iter().filter(|v| v.is_finite() && **v > 0.0) {
+        // Clamped rather than dropped: the firmware holds its tracker inside
+        // the configured range, so a sample outside it belongs to the end bin
+        // it was held against.
         let bin = (((v - low) / width) as isize).clamp(0, TRACE_BINS as isize - 1) as usize;
         counts[bin] += 1.0;
         total += 1.0;
@@ -264,6 +239,7 @@ fn histogram(samples: &[f64], low_hz: f64, high_hz: f64) -> Option<TracedCenter>
             .map(|i| low + (i as f64 + 0.5) * width)
             .collect(),
         weight: counts.into_iter().map(|c| c / total).collect(),
+        bin_width_hz: width,
     })
 }
 

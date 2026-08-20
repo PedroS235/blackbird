@@ -79,7 +79,15 @@ pub(in crate::app) fn filter_color(palette: &Palette) -> Color32 {
 /// apart is a fundamental from its multiples.
 pub(in crate::app) fn harmonic_color(palette: &Palette, order: u32) -> Color32 {
     let index = order.max(1) as usize - 1;
-    hue_color(palette, HARMONIC_HUES[index % HARMONIC_HUES.len()], 0.85)
+    // Saturation from the palette too: a band is a fill as well as an outline,
+    // and a light background needs more of it to read at all.
+    let saturation = if palette.is_dark { 0.80 } else { 0.95 };
+
+    hue_color(
+        palette,
+        HARMONIC_HUES[index % HARMONIC_HUES.len()],
+        saturation,
+    )
 }
 
 /// Hue is the identity and survives a theme switch; only luminance comes from

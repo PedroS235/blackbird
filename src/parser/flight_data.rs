@@ -81,6 +81,16 @@ impl<T> std::ops::IndexMut<Axis> for PerAxis<T> {
 /// Betaflight logs throttle as the fourth stick channel.
 const THROTTLE: usize = 3;
 
+/// Motor-indexed collections grow to fit rather than being sized up front: how
+/// many motors a log has is learnt from its field names, and a quad, a hex and
+/// an octo all land here.
+pub(super) fn set_at<T: Default>(slots: &mut Vec<T>, index: usize, value: T) {
+    if slots.len() <= index {
+        slots.resize_with(index + 1, T::default);
+    }
+    slots[index] = value;
+}
+
 /// Names a single logged stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -117,26 +127,16 @@ impl FlightData {
                 Some(slot) => slot,
                 None => return self,
             },
-            Channel::Motor(i) => return self.set_indexed(i, samples, |fd| &mut fd.motors),
-            Channel::Rpm(i) => return self.set_indexed(i, samples, |fd| &mut fd.rpm),
+            Channel::Motor(i) => {
+                set_at(&mut self.motors, i, samples);
+                return self;
+            }
+            Channel::Rpm(i) => {
+                set_at(&mut self.rpm, i, samples);
+                return self;
+            }
         };
         *slot = Some(samples);
-        self
-    }
-
-    /// Motor-indexed channels grow their `Vec` to fit rather than being sized
-    /// up front — the parser learns the motor count from the field names.
-    fn set_indexed(
-        mut self,
-        i: usize,
-        samples: Vec<f64>,
-        slot: impl Fn(&mut Self) -> &mut Vec<Vec<f64>>,
-    ) -> Self {
-        let vecs = slot(&mut self);
-        if vecs.len() <= i {
-            vecs.resize(i + 1, Vec::new());
-        }
-        vecs[i] = samples;
         self
     }
 

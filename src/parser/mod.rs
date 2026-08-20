@@ -2,6 +2,7 @@ mod flight_data;
 pub mod metadata;
 mod sample_rate;
 
+use flight_data::set_at;
 pub use flight_data::{Axis, Channel, FlightData, PerAxis, Trimmed};
 pub use metadata::Metadata;
 pub use sample_rate::SampleRateEstimate;
@@ -416,15 +417,6 @@ struct FieldIndices {
     debug: [Option<usize>; 8],
 }
 
-/// Motor-indexed fields are as wide as the log names them — a quad logs four
-/// and a hex six.
-fn set_indexed(slots: &mut Vec<Option<usize>>, index: usize, col: usize) {
-    if slots.len() <= index {
-        slots.resize(index + 1, None);
-    }
-    slots[index] = Some(col);
-}
-
 fn build_field_indices(field_names: &[String]) -> FieldIndices {
     let mut idx = FieldIndices {
         raw_gyro: [None; 3],
@@ -447,8 +439,8 @@ fn build_field_indices(field_names: &[String]) -> FieldIndices {
             "accSmooth" if axis < 3 => idx.acceleration[axis] = Some(col),
             "setpoint" if axis < 4 => idx.setpoint[axis] = Some(col),
             "rcCommand" if axis < 4 => idx.rc_command[axis] = Some(col),
-            "motor" => set_indexed(&mut idx.motors, axis, col),
-            "eRPM" => set_indexed(&mut idx.rpm, axis, col),
+            "motor" => set_at(&mut idx.motors, axis, Some(col)),
+            "eRPM" => set_at(&mut idx.rpm, axis, Some(col)),
             "debug" if axis < 8 => idx.debug[axis] = Some(col),
             "vbatLatest" | "vbat" => idx.vbat = Some(col),
             "amperageLatest" | "amperage" => idx.current = Some(col),

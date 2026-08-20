@@ -106,11 +106,13 @@ impl SpectralAnalysis {
 }
 
 impl AxisSpectral {
-    /// Peaks the dynamic notch can never reach, whatever it tracks.
-    pub fn peaks_outside_dyn_notch(&self) -> usize {
+    /// How many peaks sit where the dynamic notch cannot reach them. Counted
+    /// here rather than in the panel so the recoloured line and the prose
+    /// under the plot are the same claim.
+    pub fn peaks_reaching(&self, reach: DynNotchReach) -> usize {
         self.peaks
             .iter()
-            .filter(|p| p.dyn_notch_reach.is_some_and(DynNotchReach::is_outside))
+            .filter(|p| p.dyn_notch_reach == Some(reach))
             .count()
     }
 }
@@ -352,7 +354,7 @@ mod test {
             .expect("a peak was found");
 
         assert_eq!(loudest.dyn_notch_reach, Some(DynNotchReach::AboveMax));
-        assert!(roll.peaks_outside_dyn_notch() > 0);
+        assert!(roll.peaks_reaching(DynNotchReach::AboveMax) > 0);
     }
 
     /// No dynamic notch configured is not the same claim as a peak the
@@ -366,7 +368,7 @@ mod test {
             .clone();
 
         assert!(roll.peaks.iter().all(|p| p.dyn_notch_reach.is_none()));
-        assert_eq!(roll.peaks_outside_dyn_notch(), 0);
+        assert_eq!(roll.peaks_reaching(DynNotchReach::AboveMax), 0);
     }
 
     #[test]

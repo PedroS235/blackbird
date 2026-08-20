@@ -21,9 +21,10 @@ const LABELLED_PEAKS: usize = 3;
 /// the curve reads through a stack of overlapping harmonics.
 const BAND_FILL_ALPHA: u8 = 28;
 
-/// Alpha range of a traced-centre bin, from the frequencies the tracker barely
-/// visited to the one it sat on.
-const TRACE_ALPHA: (f32, f32) = (20.0, 190.0);
+/// Alpha of a traced-centre bin: the frequencies the tracker barely visited,
+/// and the one it sat on.
+const TRACE_ALPHA_MIN: f32 = 20.0;
+const TRACE_ALPHA_MAX: f32 = 190.0;
 
 /// Keeps an explicit checkbox rather than a legend: the filtered trace is a
 /// conditional build, not a hide, and the panel emits a named marker per
@@ -166,18 +167,14 @@ fn draw_traced(plot_ui: &mut PlotUi<'_>, palette: &Palette, traced: &TracedCente
     if peak <= 0.0 {
         return;
     }
-    let width = traced.freq_hz.windows(2).map(|w| w[1] - w[0]).next();
-    let (half, color) = (
-        width.unwrap_or(1.0) / 2.0,
-        colors::filter_color(palette).to_opaque(),
-    );
-    let (min_alpha, max_alpha) = TRACE_ALPHA;
+    let half = traced.bin_width_hz / 2.0;
+    let color = colors::filter_color(palette).to_opaque();
 
     for (&freq, &weight) in traced.freq_hz.iter().zip(&traced.weight) {
         if weight <= 0.0 {
             continue;
         }
-        let alpha = min_alpha + (max_alpha - min_alpha) * (weight / peak) as f32;
+        let alpha = TRACE_ALPHA_MIN + (TRACE_ALPHA_MAX - TRACE_ALPHA_MIN) * (weight / peak) as f32;
         // The label goes on the bin the tracker spent longest in, so that the
         // one mark saying "traced" sits on the reading that matters.
         let name = match weight == peak {
@@ -211,13 +208,21 @@ fn draw_peaks(plot_ui: &mut PlotUi<'_>, palette: &Palette, spec: &AxisSpectral) 
             false => colors::peak_color(palette),
         };
         let label = peak_label(peak);
+        let labelled = by_amplitude.contains(&i);
 
-        plot_ui.vline(VLine::new(label.clone(), peak.freq_hz).color(color));
+        // The label belongs to the peak once. Where the text draws it, the
+        // line carries no name of its own — the two used to say the same
+        // thing, and half the marks on the plot were the other half repeated.
+        let line_name = match labelled {
+            true => String::new(),
+            false => label.clone(),
+        };
+        plot_ui.vline(VLine::new(line_name, peak.freq_hz).color(color));
 
-        if by_amplitude.contains(&i) {
+        if labelled {
             plot_ui.text(
                 Text::new(
-                    format!("{label}_label"),
+                    format!("peak_{i}"),
                     PlotPoint::new(peak.freq_hz, peak.amplitude_db),
                     label,
                 )
@@ -237,7 +242,10 @@ fn peak_label(peak: &FrequencyPeak) -> String {
         None => "",
     };
     let attenuation = match peak.attenuated_db {
-        Some(db) => format!(" · {:.0} dB filtered", -db),
+        // A filter chain that leaves a peak louder than it found it is a real
+        // outcome, and must not read as a cut of the same size.
+        Some(db) if db < 0.0 => format!(" · {:.0} dB louder filtered", -db),
+        Some(db) => format!(" · {db:.0} dB filtered"),
         None => String::new(),
     };
 
@@ -248,16 +256,18 @@ fn peak_label(peak: &FrequencyPeak) -> String {
 /// for what the plot cannot hold is the idiom the step response panel uses.
 fn out_of_reach_prose(spec: &AxisSpectral, overlays: &[FilterOverlay]) -> Option<String> {
     let (low_hz, high_hz) = dyn_notch_range(overlays)?;
-    let count = |reach| {
-        spec.peaks
-            .iter()
-            .filter(|p| p.dyn_notch_reach == Some(reach))
-            .count()
-    };
 
     let clauses: Vec<String> = [
-        (count(DynNotchReach::AboveMax), "above", high_hz),
-        (count(DynNotchReach::BelowMin), "below", low_hz),
+        (
+            spec.peaks_reaching(DynNotchReach::AboveMax),
+            "above",
+            high_hz,
+        ),
+        (
+            spec.peaks_reaching(DynNotchReach::BelowMin),
+            "below",
+            low_hz,
+        ),
     ]
     .into_iter()
     .filter(|&(n, _, _)| n > 0)
@@ -398,6 +408,16 @@ mod test {
     /// never shown.
     #[test]
     fn a_labelled_peak_states_what_the_filters_took_off_it() {
-        assert_eq!(peak_label(&peak(212.0, None)), "212 Hz · -7 dB filtered");
+        assert_eq!(peak_label(&peak(212.0, None)), "212 Hz · 7 dB filtered");
+    }
+
+    /// A filter chain that leaves a peak louder than it found it says so,
+    /// rather than reading as a cut of the same size.
+    #[test]
+    fn a_peak_the_filters_made_worse_is_not_shown_as_filtered() {
+        let mut amplified = peak(212.0, None);
+        amplified.attenuated_db = Some(-3.0);
+
+        assert_eq!(peak_label(&amplified), "212 Hz · 3 dB louder filtered");
     }
 }
