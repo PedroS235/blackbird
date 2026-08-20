@@ -3,7 +3,7 @@ pub mod spectral;
 pub mod step_response;
 
 pub use overlays::{
-    FilterLoop, FilterOverlay, HarmonicBand, OverlayFamily, OverlayShape, TracedCenter,
+    FilterLoop, FilterOverlay, HarmonicBand, OverlayFamily, OverlayShape, TracedResponse,
 };
 pub use spectral::{
     AxisSpectral, DynNotchReach, FrequencyPeak, GyroNoiseAnalyzer, SpectralAnalysis,

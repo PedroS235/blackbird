@@ -147,9 +147,10 @@ fn a_zero_weight_harmonic_is_marked_unfiltered_end_to_end() {
 }
 
 /// The dynamic notch is drawn as the range it may reach, and — this fixture
-/// was flown in `FFT_FREQ` — as where the tracker actually sat.
+/// was flown in `FFT_FREQ` — as what it actually took off, from the centres
+/// the tracker used.
 #[test]
-fn a_fft_freq_fixture_carries_both_the_configured_range_and_the_traced_centre() {
+fn a_fft_freq_fixture_carries_both_the_configured_range_and_the_traced_response() {
     let overlays = overlays(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
     let dyn_notch = family(&overlays, OverlayFamily::DynNotch);
 
@@ -164,12 +165,24 @@ fn a_fft_freq_fixture_carries_both_the_configured_range_and_the_traced_centre() 
     assert_eq!(dyn_notch[0].label, "Dyn notch range (×2)");
 
     let OverlayShape::Traced(per_axis) = &dyn_notch[1].shape else {
-        panic!("a log flown in FFT_FREQ carries the traced centre");
+        panic!("a log flown in FFT_FREQ carries the traced response");
     };
     let roll = per_axis[Axis::Roll].as_ref().expect("roll was traced");
-    assert!((roll.weight.iter().sum::<f64>() - 1.0).abs() < 1e-9);
-    assert!(roll.freq_hz.first().is_some_and(|&f| f > 90.0));
-    assert!(roll.freq_hz.last().is_some_and(|&f| f < 400.0));
+
+    assert_eq!(roll.freq_hz.len(), roll.gain_db.len());
+    // A notch only ever takes energy away, and the curve is drawn on an axis
+    // that cannot reach minus infinity.
+    assert!(roll.gain_db.iter().all(|&g| (-40.0..=0.0).contains(&g)));
+
+    // The tracker really was tracking something, so somewhere in its range it
+    // cut. A curve flat at zero would mean the notch did nothing all flight.
+    let deepest = roll.gain_db.iter().copied().fold(0.0, f64::min);
+    assert!(deepest < -1.0, "the notch cut at most {deepest:.2} dB");
+
+    // The V's skirts reach past the configured range rather than stopping dead
+    // at a bound the filter does not have.
+    assert!(roll.freq_hz.first().is_some_and(|&f| f < 90.0));
+    assert!(roll.freq_hz.last().is_some_and(|&f| f > 400.0));
 }
 
 /// The negative case: flown in another debug mode, `debug[0..3]` is something

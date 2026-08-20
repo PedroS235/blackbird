@@ -64,18 +64,36 @@ pub struct HarmonicBand {
     pub filtered: bool,
 }
 
-/// Where the firmware's dynamic notch tracker actually sat, as time spent per
-/// frequency. A single number cannot say that a tracker was pinned at one end
-/// of its range for half the flight; this can.
+/// What the dynamic notch actually took off, per frequency.
+///
+/// A notch is not a rectangle: its response is a V, deep at the centre and
+/// recovering either side at a rate its Q sets. And a *dynamic* notch has no
+/// one centre — it moved all flight, so no single V describes it either. This
+/// is the notch's response at every centre the tracker used, averaged in
+/// power over how long it spent at each.
+///
+/// So a tracker that sat still leaves a deep narrow V, and one that roamed
+/// leaves a broad shallow trough — because no single frequency ever got the
+/// full cut. That difference is the whole diagnosis, and a band drawn across
+/// the configured range states neither.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TracedCenter {
-    /// Bin centres, Hz.
+pub struct TracedResponse {
     pub freq_hz: Vec<f64>,
+    /// Mean power gain in dB, at or below zero. Floored at
+    /// [`MIN_GAIN_DB`] — the null of a notch is unbounded, and a plot cannot
+    /// draw minus infinity.
+    pub gain_db: Vec<f64>,
+}
+
+/// Where the tracker sat, as time spent per frequency. The intermediate the
+/// response is averaged over, not an output: as a picture it says where the
+/// notch was, and a pilot wants to know what it removed.
+#[derive(Debug, Clone, PartialEq)]
+struct Dwell {
+    /// Bin centres, Hz.
+    freq_hz: Vec<f64>,
     /// Fraction of the analysed window spent in each bin, summing to 1.
-    pub weight: Vec<f64>,
-    /// How wide each bin is. Carried rather than left to be re-derived from
-    /// the spacing of `freq_hz`, which is the same number computed twice.
-    pub bin_width_hz: f64,
+    weight: Vec<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,7 +105,7 @@ pub enum OverlayShape {
     /// One band per motor per harmonic order.
     Harmonics(Vec<HarmonicBand>),
     /// Measured, not configured. Per axis, because the tracker is.
-    Traced(PerAxis<Option<TracedCenter>>),
+    Traced(PerAxis<Option<TracedResponse>>),
 }
 
 /// A filter's geometry in the spectrum, with the family that toggles it.
@@ -98,10 +116,18 @@ pub struct FilterOverlay {
     pub shape: OverlayShape,
 }
 
-/// How many bins the traced centre is reduced to. Enough that a tracker
-/// sweeping its range reads as a sweep, few enough that a pinned one reads as
-/// a single bar.
+/// How many bins the traced centre is reduced to before the response is
+/// averaged over them. Enough that a tracker sweeping its range averages to a
+/// smooth trough, few enough to keep the averaging cheap.
 const TRACE_BINS: usize = 64;
+
+/// Points the response curve is drawn from. A notch's null is narrow, so a
+/// coarse grid would miss the bottom of the V and understate the cut.
+const RESPONSE_POINTS: usize = 512;
+
+/// The floor the response is clamped to. A notch's null is unbounded; a plot
+/// axis is not, and 40 dB down is already "gone".
+pub const MIN_GAIN_DB: f64 = -40.0;
 
 /// Every overlay this log can support, over the same window the spectra were
 /// measured on.
@@ -174,7 +200,8 @@ fn is_filtered(rpm_filter: Option<&RpmFilterConfig>, order: u32) -> bool {
 }
 
 /// The configured range as a band, and — where the log was flown in
-/// `FFT_FREQ` — the centre the tracker actually chose, as a density.
+/// `FFT_FREQ` — what the notch actually took off, from the centres the
+/// tracker chose.
 fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay> {
     let Some(cfg) = &metadata.filters.dyn_notch else {
         return Vec::new();
@@ -191,15 +218,20 @@ fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay> {
     }];
 
     if metadata.logs_dyn_notch_trace() {
+        let fs = fd.sample_rate_hz();
         let traced = PerAxis(Axis::ALL.map(|axis| {
-            fd.debug_axis(axis)
-                .and_then(|s| histogram(s, low_hz, high_hz))
+            let dwell = fd
+                .debug_axis(axis)
+                .and_then(|s| dwell_histogram(s, low_hz, high_hz))?;
+            traced_response(&dwell, cfg.q as f64, fs, low_hz, high_hz)
         }));
+
         if traced.0.iter().any(Option::is_some) {
             overlays.push(FilterOverlay {
-                // Betaflight logs one centre per axis however many notches are
-                // configured, and this says so rather than implying the rest.
-                label: "Dyn notch centre (traced)".to_string(),
+                // One notch, however many were configured: Betaflight logs one
+                // centre per axis, so the others cannot be drawn and this does
+                // not pretend they were.
+                label: "Dyn notch response (traced)".to_string(),
                 family: OverlayFamily::DynNotch,
                 shape: OverlayShape::Traced(traced),
             });
@@ -209,10 +241,85 @@ fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay> {
     overlays
 }
 
+/// The notch's response at each centre the tracker used, averaged in power by
+/// how long it sat there.
+///
+/// Averaged in power rather than in decibels because that is what the noise
+/// does: a frequency notched hard for a tenth of the flight and untouched for
+/// the rest kept nine tenths of its energy, which averaging the decibels would
+/// report as a 10 dB cut it never got.
+fn traced_response(
+    dwell: &Dwell,
+    q: f64,
+    sample_rate_hz: f64,
+    low_hz: f64,
+    high_hz: f64,
+) -> Option<TracedResponse> {
+    if q <= 0.0 || sample_rate_hz <= 0.0 {
+        return None;
+    }
+    // Past the range, out to where the skirts of the widest notch have
+    // recovered — the V drawn cut off at the configured bound would look like
+    // a wall the filter does not have.
+    let nyquist = sample_rate_hz / 2.0;
+    let pad = (high_hz / q).max(10.0);
+    let (from, to) = ((low_hz - pad).max(1.0), (high_hz + pad).min(nyquist));
+    if to <= from {
+        return None;
+    }
+
+    let step = (to - from) / (RESPONSE_POINTS - 1) as f64;
+    let centres: Vec<(f64, f64)> = dwell
+        .freq_hz
+        .iter()
+        .zip(&dwell.weight)
+        .filter(|&(_, &w)| w > 0.0)
+        .map(|(&f, &w)| (f, w))
+        .collect();
+
+    let (freq_hz, gain_db) = (0..RESPONSE_POINTS)
+        .map(|i| {
+            let freq = from + i as f64 * step;
+            let power: f64 = centres
+                .iter()
+                .map(|&(centre, weight)| weight * notch_power_gain(freq, centre, q, sample_rate_hz))
+                .sum();
+
+            (freq, (10.0 * power.log10()).clamp(MIN_GAIN_DB, 0.0))
+        })
+        .unzip();
+
+    Some(TracedResponse { freq_hz, gain_db })
+}
+
+/// |H(f)|² of the biquad notch Betaflight runs, at `centre` with quality `q`.
+///
+/// The digital response, not the analogue approximation: the filter runs at
+/// the gyro loop rate, and this is the shape it actually has there.
+fn notch_power_gain(freq_hz: f64, centre_hz: f64, q: f64, sample_rate_hz: f64) -> f64 {
+    use std::f64::consts::TAU;
+
+    // RBJ cookbook notch: b = [1, -2cos w0, 1], a = [1 + α, -2cos w0, 1 - α].
+    let w0 = TAU * centre_hz / sample_rate_hz;
+    let alpha = w0.sin() / (2.0 * q);
+    let (b1, a0, a2) = (-2.0 * w0.cos(), 1.0 + alpha, 1.0 - alpha);
+
+    let w = TAU * freq_hz / sample_rate_hz;
+    let (cos1, sin1, cos2, sin2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
+
+    let num = (1.0 + b1 * cos1 + cos2).powi(2) + (b1 * sin1 + sin2).powi(2);
+    let den = (a0 + b1 * cos1 + a2 * cos2).powi(2) + (b1 * sin1 + a2 * sin2).powi(2);
+
+    match den > 0.0 {
+        true => num / den,
+        false => 1.0,
+    }
+}
+
 /// Binned over the range the tracker was allowed rather than over the range it
 /// used — a tracker pinned at its configured maximum has to read as pinned,
 /// which a histogram rescaled to its own extent cannot show.
-fn histogram(samples: &[f64], low_hz: f64, high_hz: f64) -> Option<TracedCenter> {
+fn dwell_histogram(samples: &[f64], low_hz: f64, high_hz: f64) -> Option<Dwell> {
     let (low, high) = match high_hz > low_hz {
         true => (low_hz, high_hz),
         false => return None,
@@ -234,12 +341,11 @@ fn histogram(samples: &[f64], low_hz: f64, high_hz: f64) -> Option<TracedCenter>
         return None;
     }
 
-    Some(TracedCenter {
+    Some(Dwell {
         freq_hz: (0..TRACE_BINS)
             .map(|i| low + (i as f64 + 0.5) * width)
             .collect(),
         weight: counts.into_iter().map(|c| c / total).collect(),
-        bin_width_hz: width,
     })
 }
 
@@ -498,26 +604,103 @@ mod test {
         }
     }
 
-    fn traced_log() -> FlightData {
+    /// 8 kHz, the loop rate these filters actually run at — at 1 kHz a notch
+    /// in the hundreds of hertz sits at Nyquist, where a biquad degenerates.
+    fn traced_log(centres: Vec<f64>) -> FlightData {
         FlightData::default()
-            .with_time(vec![0, 1000, 2000, 3000])
-            .with_channel(Channel::Debug(0), vec![495.0, 495.0, 495.0, 200.0])
+            .with_time((0..centres.len() as u64).map(|i| i * 125).collect())
+            .with_channel(Channel::Debug(0), centres)
     }
 
-    /// A tracker pinned at the top of its range spends most of the flight in
-    /// the last bin, which is the fault this overlay exists to show.
-    #[test]
-    fn the_traced_centre_is_a_density_over_the_configured_range() {
-        let overlays = dyn_notch(&traced_log().trimmed(0.0), &dyn_notch_metadata("FFT_FREQ"));
+    fn traced_of(centres: Vec<f64>) -> TracedResponse {
+        let overlays = dyn_notch(
+            &traced_log(centres).trimmed(0.0),
+            &dyn_notch_metadata("FFT_FREQ"),
+        );
         let OverlayShape::Traced(per_axis) = &overlays[1].shape else {
-            panic!("the second dyn notch overlay is the trace");
+            panic!("the second dyn notch overlay is the response");
         };
+        per_axis[Axis::Roll].clone().expect("roll was traced")
+    }
 
-        let roll = per_axis[Axis::Roll].as_ref().expect("roll was traced");
-        assert!((roll.weight.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    /// The frequency the curve cuts hardest at, and by how much.
+    fn deepest(traced: &TracedResponse) -> (f64, f64) {
+        traced
+            .freq_hz
+            .iter()
+            .zip(&traced.gain_db)
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(&f, &g)| (f, g))
+            .expect("a curve was drawn")
+    }
+
+    /// The point of the whole overlay: a tracker that sat still cut one
+    /// frequency hard, and the curve has to show that as a deep narrow V —
+    /// not the flat band across the whole configured range that a pilot reads
+    /// as "everything in here is gone".
+    #[test]
+    fn a_tracker_that_sat_still_draws_a_deep_narrow_notch() {
+        let traced = traced_of(vec![250.0; 16]);
+        let (freq, gain) = deepest(&traced);
+
+        assert!((freq - 250.0).abs() < 10.0, "deepest at {freq:.0} Hz");
+        assert!(gain < -20.0, "a still tracker only cut {gain:.1} dB");
+
+        // Narrow: a hundred hertz off the centre the notch took almost nothing.
+        let away = traced
+            .freq_hz
+            .iter()
+            .zip(&traced.gain_db)
+            .find(|&(&f, _)| f > 350.0)
+            .map(|(_, &g)| g)
+            .expect("the curve reaches past the notch");
+        assert!(away > -1.0, "{away:.1} dB a hundred hertz off centre");
+    }
+
+    /// The diagnosis the average exists for: the same flight spent spread
+    /// across the range cuts every frequency less hard than sitting on one,
+    /// because no frequency ever got the full notch.
+    #[test]
+    fn a_roaming_tracker_cuts_less_deeply_than_a_still_one() {
+        let still = deepest(&traced_of(vec![250.0; 16])).1;
+        let roaming = deepest(&traced_of(vec![
+            120.0, 170.0, 220.0, 270.0, 320.0, 370.0, 420.0, 470.0, 120.0, 170.0, 220.0, 270.0,
+            320.0, 370.0, 420.0, 470.0,
+        ]))
+        .1;
+
         assert!(
-            (roll.weight[TRACE_BINS - 1] - 0.75).abs() < 1e-9,
-            "{roll:?}"
+            roaming > still + 10.0,
+            "roaming cut {roaming:.1} dB against a still tracker's {still:.1} dB"
+        );
+    }
+
+    /// Nothing is ever amplified, and nothing falls through the floor a plot
+    /// axis can draw.
+    #[test]
+    fn the_response_stays_between_the_floor_and_no_cut_at_all() {
+        let traced = traced_of(vec![250.0; 16]);
+
+        assert!(
+            traced
+                .gain_db
+                .iter()
+                .all(|&g| (MIN_GAIN_DB..=0.0).contains(&g))
+        );
+        assert_eq!(traced.freq_hz.len(), traced.gain_db.len());
+    }
+
+    /// The dwell histogram the average is taken over: a tracker pinned at the
+    /// top of its range spends most of the flight in the last bin.
+    #[test]
+    fn the_dwell_histogram_is_a_density_over_the_configured_range() {
+        let dwell =
+            dwell_histogram(&[495.0, 495.0, 495.0, 200.0], 100.0, 500.0).expect("four samples");
+
+        assert!((dwell.weight.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!(
+            (dwell.weight[TRACE_BINS - 1] - 0.75).abs() < 1e-9,
+            "{dwell:?}"
         );
     }
 
@@ -527,7 +710,7 @@ mod test {
     #[test]
     fn without_fft_freq_the_configured_range_survives_but_the_trace_does_not() {
         let overlays = dyn_notch(
-            &traced_log().trimmed(0.0),
+            &traced_log(vec![250.0; 8]).trimmed(0.0),
             &dyn_notch_metadata("GYRO_SCALED"),
         );
 
@@ -548,7 +731,7 @@ mod test {
         let mut metadata = dyn_notch_metadata("NONE");
         metadata.filters.dyn_notch.as_mut().unwrap().count = 3;
 
-        let overlays = dyn_notch(&traced_log().trimmed(0.0), &metadata);
+        let overlays = dyn_notch(&traced_log(vec![250.0; 8]).trimmed(0.0), &metadata);
         assert_eq!(overlays[0].label, "Dyn notch range (×3)");
     }
 

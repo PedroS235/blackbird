@@ -239,10 +239,15 @@ load, and storing it puts the feature behind the loader integration seam.
   the frequencies that motor actually reached. Order count comes from
   `RpmFilterConfig::harmonics`; a zero-weight order is flagged unfiltered.
   Stopped-motor samples are excluded, so no band runs down to 0 Hz
-- `OverlayShape::Traced` — where the dynamic notch tracker actually sat, as a
-  histogram over frequency, per axis. Read from `debug[0..3]`, gated on
-  `Metadata::logs_dyn_notch_trace()` (debug mode `FFT_FREQ`) — the one rule,
-  shared with the Spectrogram sub-tab's overlay
+- `OverlayShape::Traced` — what the dynamic notch actually took off, per
+  axis. A notch is a V, not a rectangle, and a *dynamic* notch has no one
+  centre, so this is the biquad response at every centre the tracker used,
+  averaged **in power** (not in decibels) by how long it sat there. A tracker
+  that sat still draws a deep narrow V; one that roamed draws a broad shallow
+  trough, because no frequency ever got the full cut. Read from `debug[0..3]`,
+  gated on `Metadata::logs_dyn_notch_trace()` (debug mode `FFT_FREQ`) — the
+  one rule, shared with the Spectrogram sub-tab's overlay. Betaflight logs one
+  centre per axis however many notches are configured, so only one is drawn
 - `eRPM` → Hz is `erpm * 100 / (poles / 2) / 60`. `motor_poles` comes from the
   raw header passthrough, defaulting to Betaflight's 14
 - Overlay visibility is UI state (`ui::overlay_menu::OverlayVisibility`), a

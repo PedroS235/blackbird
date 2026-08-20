@@ -1,11 +1,11 @@
 use egui::{Align2, Color32, RichText, Ui, Vec2b};
-use egui_plot::{Line, Plot, PlotPoint, PlotPoints, PlotUi, Span, Text, VLine};
+use egui_plot::{HLine, Line, Plot, PlotPoint, PlotPoints, PlotUi, Span, Text, VLine};
 use elegance::Palette;
 
 use super::drawn_axes;
 use crate::analysis::{
     AxisSpectral, DynNotchReach, FilterOverlay, FrequencyPeak, HarmonicBand, OverlayFamily,
-    OverlayShape, SpectralAnalysis, TracedCenter,
+    OverlayShape, SpectralAnalysis, TracedResponse,
 };
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
@@ -21,10 +21,17 @@ const LABELLED_PEAKS: usize = 3;
 /// the curve reads through a stack of overlapping harmonics.
 const BAND_FILL_ALPHA: u8 = 28;
 
-/// Alpha of a traced-centre bin: the frequencies the tracker barely visited,
-/// and the one it sat on.
-const TRACE_ALPHA_MIN: f32 = 20.0;
-const TRACE_ALPHA_MAX: f32 = 190.0;
+/// The traced response is a gain curve, and the plot's y axis is signal power.
+/// Its zero is pinned to the loudest bin of this axis's own spectrum, so the V
+/// hangs over the noise it is cutting, at the same decibels per pixel, and
+/// stays put when the pilot zooms.
+fn response_anchor_db(spec: &AxisSpectral) -> f64 {
+    spec.raw_psd
+        .power_db
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max)
+}
 
 /// Keeps an explicit checkbox rather than a legend: the filtered trace is a
 /// conditional build, not a hide, and the panel emits a named marker per
@@ -98,8 +105,9 @@ impl Psd {
                         );
                     }
 
+                    let anchor_db = response_anchor_db(spec);
                     for overlay in &visible {
-                        draw_overlay(plot_ui, &palette, overlay, axis);
+                        draw_overlay(plot_ui, &palette, overlay, axis, anchor_db);
                     }
                     if self.overlays.shows_peaks() {
                         draw_peaks(plot_ui, &palette, spec);
@@ -127,7 +135,13 @@ fn plot_id(axis: Axis) -> String {
     format!("psd_plot_{}", axis.name())
 }
 
-fn draw_overlay(plot_ui: &mut PlotUi<'_>, palette: &Palette, overlay: &FilterOverlay, axis: Axis) {
+fn draw_overlay(
+    plot_ui: &mut PlotUi<'_>,
+    palette: &Palette,
+    overlay: &FilterOverlay,
+    axis: Axis,
+    anchor_db: f64,
+) {
     let color = colors::filter_color(palette);
 
     match &overlay.shape {
@@ -142,7 +156,7 @@ fn draw_overlay(plot_ui: &mut PlotUi<'_>, palette: &Palette, overlay: &FilterOve
         OverlayShape::Harmonics(bands) => draw_harmonics(plot_ui, palette, bands),
         OverlayShape::Traced(per_axis) => {
             if let Some(traced) = per_axis[axis].as_ref() {
-                draw_traced(plot_ui, palette, traced, &overlay.label);
+                draw_traced_response(plot_ui, palette, traced, anchor_db, &overlay.label);
             }
         }
     }
@@ -174,35 +188,36 @@ fn draw_harmonics(plot_ui: &mut PlotUi<'_>, palette: &Palette, bands: &[Harmonic
     }
 }
 
-/// Where the tracker actually sat, as time spent per frequency: opacity is the
-/// share of the analysed window. A tracker pinned at one end of its range for
-/// half the flight is one solid bar, which no single number could say.
-fn draw_traced(plot_ui: &mut PlotUi<'_>, palette: &Palette, traced: &TracedCenter, label: &str) {
-    let peak = traced.weight.iter().copied().fold(0.0, f64::max);
-    if peak <= 0.0 {
+/// What the notch actually took off, as the V it really is.
+///
+/// A dynamic notch has no one centre, so this is its response at every centre
+/// the tracker used, averaged by how long it sat there: pinned at one
+/// frequency it draws a deep narrow V, roaming it draws a broad shallow
+/// trough. A band across the configured range said neither, and a band is
+/// what a pilot reads as "everything in here is gone".
+fn draw_traced_response(
+    plot_ui: &mut PlotUi<'_>,
+    palette: &Palette,
+    traced: &TracedResponse,
+    anchor_db: f64,
+    label: &str,
+) {
+    if !anchor_db.is_finite() {
         return;
     }
-    let half = traced.bin_width_hz / 2.0;
-    let color = colors::filter_color(palette).to_opaque();
+    let color = colors::filter_color(palette);
 
-    for (&freq, &weight) in traced.freq_hz.iter().zip(&traced.weight) {
-        if weight <= 0.0 {
-            continue;
-        }
-        let alpha = TRACE_ALPHA_MIN + (TRACE_ALPHA_MAX - TRACE_ALPHA_MIN) * (weight / peak) as f32;
-        // The label goes on the bin the tracker spent longest in, so that the
-        // one mark saying "traced" sits on the reading that matters.
-        let name = match weight == peak {
-            true => label.to_string(),
-            false => String::new(),
-        };
+    let curve: PlotPoints = traced
+        .freq_hz
+        .iter()
+        .zip(&traced.gain_db)
+        .map(|(&f, &gain)| [f, anchor_db + gain])
+        .collect();
+    plot_ui.line(Line::new(label.to_string(), curve).color(color));
 
-        plot_ui.span(
-            Span::new(name, freq - half..=freq + half)
-                .fill(color.gamma_multiply_u8(alpha as u8))
-                .border_color(Color32::TRANSPARENT),
-        );
-    }
+    // The line the V is measured down from — without it the curve is a shape
+    // with no scale, and "how deep" is the whole question.
+    plot_ui.hline(HLine::new(String::new(), anchor_db).color(color.gamma_multiply(0.4)));
 }
 
 /// One mark per peak, and a label on the loudest few. A peak the dynamic notch
