@@ -409,10 +409,20 @@ struct FieldIndices {
     setpoint: [Option<usize>; 4],
     rc_command: [Option<usize>; 4],
     motors: Vec<Option<usize>>,
+    rpm: Vec<Option<usize>>,
     vbat: Option<usize>,
     current: Option<usize>,
     rssi: Option<usize>,
     debug: [Option<usize>; 8],
+}
+
+/// Motor-indexed fields are as wide as the log names them — a quad logs four
+/// and a hex six.
+fn set_indexed(slots: &mut Vec<Option<usize>>, index: usize, col: usize) {
+    if slots.len() <= index {
+        slots.resize(index + 1, None);
+    }
+    slots[index] = Some(col);
 }
 
 fn build_field_indices(field_names: &[String]) -> FieldIndices {
@@ -423,6 +433,7 @@ fn build_field_indices(field_names: &[String]) -> FieldIndices {
         setpoint: [None; 4],
         rc_command: [None; 4],
         motors: Vec::new(),
+        rpm: Vec::new(),
         vbat: None,
         current: None,
         rssi: None,
@@ -436,12 +447,8 @@ fn build_field_indices(field_names: &[String]) -> FieldIndices {
             "accSmooth" if axis < 3 => idx.acceleration[axis] = Some(col),
             "setpoint" if axis < 4 => idx.setpoint[axis] = Some(col),
             "rcCommand" if axis < 4 => idx.rc_command[axis] = Some(col),
-            "motor" => {
-                if idx.motors.len() <= axis {
-                    idx.motors.resize(axis + 1, None);
-                }
-                idx.motors[axis] = Some(col);
-            }
+            "motor" => set_indexed(&mut idx.motors, axis, col),
+            "eRPM" => set_indexed(&mut idx.rpm, axis, col),
             "debug" if axis < 8 => idx.debug[axis] = Some(col),
             "vbatLatest" | "vbat" => idx.vbat = Some(col),
             "amperageLatest" | "amperage" => idx.current = Some(col),
@@ -463,7 +470,6 @@ fn build_flight_data(
     mut on_progress: impl FnMut(f32) -> bool,
 ) -> Option<FlightData> {
     let idx = build_field_indices(field_names);
-    let motor_count = idx.motors.len();
 
     let mut time_buf: Vec<u64> = Vec::new();
     let mut gyro_unfilt_bufs: [Option<Vec<f64>>; 3] = idx.raw_gyro.map(|o| o.map(|_| Vec::new()));
@@ -471,7 +477,8 @@ fn build_flight_data(
     let mut acc_bufs: [Option<Vec<f64>>; 3] = idx.acceleration.map(|o| o.map(|_| Vec::new()));
     let mut setpoint_bufs: [Option<Vec<f64>>; 4] = idx.setpoint.map(|o| o.map(|_| Vec::new()));
     let mut rc_command_bufs: [Option<Vec<f64>>; 4] = idx.rc_command.map(|o| o.map(|_| Vec::new()));
-    let mut motor_bufs: Vec<Vec<f64>> = vec![Vec::new(); motor_count];
+    let mut motor_bufs: Vec<Vec<f64>> = vec![Vec::new(); idx.motors.len()];
+    let mut rpm_bufs: Vec<Vec<f64>> = vec![Vec::new(); idx.rpm.len()];
     let mut vbat_buf: Option<Vec<f64>> = idx.vbat.map(|_| Vec::new());
     let mut current_buf: Option<Vec<f64>> = idx.current.map(|_| Vec::new());
     let mut rssi_buf: Option<Vec<f64>> = idx.rssi.map(|_| Vec::new());
@@ -512,14 +519,15 @@ fn build_flight_data(
             .iter_mut()
             .zip(idx.rc_command)
             .for_each(|(b, c)| push(b, c));
-        motor_bufs
-            .iter_mut()
-            .zip(idx.motors.iter().copied())
-            .for_each(|(buf, col)| {
-                if let Some(c) = col {
+        let push_indexed = |bufs: &mut Vec<Vec<f64>>, cols: &[Option<usize>]| {
+            bufs.iter_mut().zip(cols).for_each(|(buf, col)| {
+                if let Some(c) = *col {
                     buf.push(vals[c]);
                 }
             });
+        };
+        push_indexed(&mut motor_bufs, &idx.motors);
+        push_indexed(&mut rpm_bufs, &idx.rpm);
         push(&mut vbat_buf, idx.vbat);
         push(&mut current_buf, idx.current);
         push(&mut rssi_buf, idx.rssi);
@@ -553,7 +561,7 @@ fn build_flight_data(
         setpoint: setpoint_bufs,
         rc_command: rc_command_bufs,
         motors: motor_bufs,
-        rpm: Vec::new(),
+        rpm: rpm_bufs,
         vbat: vbat_buf,
         current: current_buf,
         rssi: rssi_buf,
@@ -592,6 +600,26 @@ mod test {
         assert_eq!(split_field_name("gyroADC[0]"), ("gyroADC", 0));
         assert_eq!(split_field_name("motor[3]"), ("motor", 3));
         assert_eq!(split_field_name("debug[7]"), ("debug", 7));
+    }
+
+    /// Without bidirectional DShot there is no `eRPM` at all, which is what
+    /// greys the harmonics overlay out rather than drawing bands at zero.
+    #[test]
+    fn field_indices_maps_erpm_per_motor() {
+        let names: Vec<String> = vec![
+            "motor[0]".into(),
+            "eRPM[0]".into(),
+            "eRPM[1]".into(),
+            "eRPM[3]".into(),
+        ];
+        let idx = build_field_indices(&names);
+
+        assert_eq!(idx.rpm, vec![Some(1), Some(2), None, Some(3)]);
+        assert!(
+            build_field_indices(&["motor[0]".to_string()])
+                .rpm
+                .is_empty()
+        );
     }
 
     #[test]

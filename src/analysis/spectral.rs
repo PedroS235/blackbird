@@ -1,4 +1,5 @@
-use crate::parser::metadata::FilterConfig;
+use super::overlays::{self, FilterOverlay};
+use crate::parser::metadata::DynNotchConfig;
 use crate::parser::{Axis, FlightData, Metadata, PerAxis};
 use crate::signal::fft::{self, BinnedSpectrum, Psd, SignalAnalyzer, Spectrum};
 
@@ -46,15 +47,34 @@ pub struct FrequencyPeak {
     /// raw − filtered amplitude at this frequency; how much the current filter
     /// config is already knocking it down. `None` if there's no filtered signal.
     pub attenuated_db: Option<f64>,
+    /// Whether the dynamic notch could ever have reached this peak. `None`
+    /// when no dynamic notch was configured, which is not the same as a peak
+    /// the tracker chose to ignore.
+    pub dyn_notch_reach: Option<DynNotchReach>,
 }
 
-/// A configured filter's position in the spectrum, for drawing over the PSD
-/// and for explaining "why" a peak looks the way it does.
-#[derive(Debug, Clone)]
-pub struct FilterMarker {
-    pub label: String,
-    pub center_hz: f32,
-    pub cutoff_hz: Option<f32>,
+/// Where a peak sits against the dynamic notch's configured range. Decided
+/// here rather than in the panel: it is a claim about the filter config, and
+/// the prose count under the plot and the recoloured line have to agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynNotchReach {
+    Inside,
+    BelowMin,
+    AboveMax,
+}
+
+impl DynNotchReach {
+    fn of(freq_hz: f64, cfg: &DynNotchConfig) -> Self {
+        match freq_hz {
+            f if f < cfg.min_hz as f64 => Self::BelowMin,
+            f if f > cfg.max_hz as f64 => Self::AboveMax,
+            _ => Self::Inside,
+        }
+    }
+
+    pub fn is_outside(self) -> bool {
+        self != Self::Inside
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,14 +93,25 @@ pub struct AxisSpectral {
 #[derive(Debug, Clone, Default)]
 pub struct SpectralAnalysis {
     axes: PerAxis<Option<AxisSpectral>>,
-    /// Shared across axes — filter config is global, not per-axis.
-    pub filter_markers: Vec<FilterMarker>,
+    /// Shared across axes — filter config is global, and the one overlay that
+    /// is measured per axis carries its own three.
+    pub overlays: Vec<FilterOverlay>,
 }
 
 impl SpectralAnalysis {
     /// `None` when the axis had no pre-filter gyro to analyse.
     pub fn axis(&self, axis: Axis) -> Option<&AxisSpectral> {
         self.axes[axis].as_ref()
+    }
+}
+
+impl AxisSpectral {
+    /// Peaks the dynamic notch can never reach, whatever it tracks.
+    pub fn peaks_outside_dyn_notch(&self) -> usize {
+        self.peaks
+            .iter()
+            .filter(|p| p.dyn_notch_reach.is_some_and(DynNotchReach::is_outside))
+            .count()
     }
 }
 
@@ -91,14 +122,16 @@ impl GyroNoiseAnalyzer {
         let throttle = fd.throttle();
         let time_ref = fd.time_s();
 
+        let dyn_notch = metadata.filters.dyn_notch.as_ref();
         let axes = PerAxis(Axis::ALL.map(|axis| {
-            fd.gyro_raw(axis)
-                .map(|raw| self.analyze_axis(raw, fd.gyro(axis), throttle, &time_ref, fs))
+            fd.gyro_raw(axis).map(|raw| {
+                self.analyze_axis(raw, fd.gyro(axis), throttle, &time_ref, fs, dyn_notch)
+            })
         }));
 
         SpectralAnalysis {
             axes,
-            filter_markers: Self::filter_markers(&metadata.filters),
+            overlays: overlays::build(&fd, metadata),
         }
     }
 
@@ -109,6 +142,7 @@ impl GyroNoiseAnalyzer {
         throttle: Option<&[f64]>,
         time_ref: &[f64],
         fs: f64,
+        dyn_notch: Option<&DynNotchConfig>,
     ) -> AxisSpectral {
         let window = fft::window_size_for(fs, raw.len());
         let analyzer = SignalAnalyzer::new(fs, window, window / 2);
@@ -136,7 +170,7 @@ impl GyroNoiseAnalyzer {
         let time_map = maps.next();
 
         let noise_floor_db = median(&raw_psd.power_db);
-        let peaks = self.find_peaks(&raw_psd, filtered_psd.as_ref(), noise_floor_db);
+        let peaks = self.find_peaks(&raw_psd, filtered_psd.as_ref(), noise_floor_db, dyn_notch);
 
         AxisSpectral {
             raw_psd,
@@ -157,6 +191,7 @@ impl GyroNoiseAnalyzer {
         raw_psd: &Psd,
         filtered_psd: Option<&Psd>,
         floor_db: f64,
+        dyn_notch: Option<&DynNotchConfig>,
     ) -> Vec<FrequencyPeak> {
         let threshold = floor_db + self.peak_min_above_floor_db;
         let mag = &raw_psd.power_db;
@@ -180,6 +215,7 @@ impl GyroNoiseAnalyzer {
                 attenuated_db: filtered_psd
                     .filter(|fp| k < fp.power_db.len())
                     .map(|fp| mag[k] - fp.power_db[k]),
+                dyn_notch_reach: dyn_notch.map(|cfg| DynNotchReach::of(freq[k], cfg)),
             })
             .collect();
 
@@ -201,63 +237,6 @@ impl GyroNoiseAnalyzer {
         }
 
         peaks
-    }
-
-    fn filter_markers(cfg: &FilterConfig) -> Vec<FilterMarker> {
-        let mut markers = Vec::new();
-
-        if let Some(lpf) = &cfg.gyro_lpf1 {
-            markers.push(FilterMarker {
-                label: "Gyro LPF1".to_string(),
-                center_hz: lpf.cutoff_hz(),
-                cutoff_hz: Some(lpf.cutoff_hz()),
-            });
-        }
-        if let Some(lpf) = &cfg.gyro_lpf2 {
-            markers.push(FilterMarker {
-                label: "Gyro LPF2".to_string(),
-                center_hz: lpf.cutoff_hz,
-                cutoff_hz: Some(lpf.cutoff_hz),
-            });
-        }
-        if let Some(lpf) = &cfg.dterm_lpf1 {
-            markers.push(FilterMarker {
-                label: "Dterm LPF1".to_string(),
-                center_hz: lpf.lowpass.cutoff_hz(),
-                cutoff_hz: Some(lpf.lowpass.cutoff_hz()),
-            });
-        }
-        if let Some(lpf) = &cfg.dterm_lpf2 {
-            markers.push(FilterMarker {
-                label: "Dterm LPF2".to_string(),
-                center_hz: lpf.cutoff_hz,
-                cutoff_hz: Some(lpf.cutoff_hz),
-            });
-        }
-
-        for (i, n) in cfg.gyro_notches.iter().enumerate() {
-            markers.push(FilterMarker {
-                label: format!("Gyro notch {}", i + 1),
-                center_hz: n.center_hz,
-                cutoff_hz: Some(n.cutoff_hz),
-            });
-        }
-        for (i, n) in cfg.dterm_notches.iter().enumerate() {
-            markers.push(FilterMarker {
-                label: format!("Dterm notch {}", i + 1),
-                center_hz: n.center_hz,
-                cutoff_hz: Some(n.cutoff_hz),
-            });
-        }
-        if let Some(dyn_notch) = &cfg.dyn_notch {
-            markers.push(FilterMarker {
-                label: "Dynamic notch range".to_string(),
-                center_hz: (dyn_notch.min_hz + dyn_notch.max_hz) / 2.0,
-                cutoff_hz: None,
-            });
-        }
-
-        markers
     }
 }
 
@@ -341,6 +320,53 @@ mod test {
 
         assert!(analysis.axis(Axis::Pitch).is_none());
         assert!(analysis.axis(Axis::Yaw).is_none());
+    }
+
+    /// A peak the dynamic notch can never reach is the panel's warning and
+    /// its prose count, so the classification is made here once.
+    #[test]
+    fn peaks_are_classified_against_the_dynamic_notch_range() {
+        let metadata = Metadata {
+            filters: crate::parser::metadata::FilterConfig {
+                dyn_notch: Some(crate::parser::metadata::DynNotchConfig {
+                    min_hz: 100.0,
+                    max_hz: 150.0,
+                    count: 1,
+                    q: 5.0,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let roll = GyroNoiseAnalyzer::default()
+            .analyze(&one_axis_log(200.0, 2000.0, 8192), &metadata)
+            .axis(Axis::Roll)
+            .expect("roll analysed")
+            .clone();
+
+        let loudest = roll
+            .peaks
+            .iter()
+            .max_by(|a, b| a.amplitude_db.total_cmp(&b.amplitude_db))
+            .expect("a peak was found");
+
+        assert_eq!(loudest.dyn_notch_reach, Some(DynNotchReach::AboveMax));
+        assert!(roll.peaks_outside_dyn_notch() > 0);
+    }
+
+    /// No dynamic notch configured is not the same claim as a peak the
+    /// tracker chose not to reach, and must not be counted as one.
+    #[test]
+    fn without_a_dynamic_notch_no_peak_is_out_of_range() {
+        let roll = GyroNoiseAnalyzer::default()
+            .analyze(&one_axis_log(200.0, 2000.0, 8192), &Metadata::default())
+            .axis(Axis::Roll)
+            .expect("roll analysed")
+            .clone();
+
+        assert!(roll.peaks.iter().all(|p| p.dyn_notch_reach.is_none()));
+        assert_eq!(roll.peaks_outside_dyn_notch(), 0);
     }
 
     #[test]

@@ -92,6 +92,9 @@ pub enum Channel {
     /// `rcCommand[3]` — the fourth stick channel, which has no axis.
     Throttle,
     Motor(usize),
+    /// `eRPM[n]` — the motor's electrical RPM as bidirectional DShot reported
+    /// it, raw. Hertz needs the pole count, which lives in the header.
+    Rpm(usize),
     Debug(usize),
     Vbat,
     Current,
@@ -114,15 +117,26 @@ impl FlightData {
                 Some(slot) => slot,
                 None => return self,
             },
-            Channel::Motor(i) => {
-                if self.motors.len() <= i {
-                    self.motors.resize(i + 1, Vec::new());
-                }
-                self.motors[i] = samples;
-                return self;
-            }
+            Channel::Motor(i) => return self.set_indexed(i, samples, |fd| &mut fd.motors),
+            Channel::Rpm(i) => return self.set_indexed(i, samples, |fd| &mut fd.rpm),
         };
         *slot = Some(samples);
+        self
+    }
+
+    /// Motor-indexed channels grow their `Vec` to fit rather than being sized
+    /// up front — the parser learns the motor count from the field names.
+    fn set_indexed(
+        mut self,
+        i: usize,
+        samples: Vec<f64>,
+        slot: impl Fn(&mut Self) -> &mut Vec<Vec<f64>>,
+    ) -> Self {
+        let vecs = slot(&mut self);
+        if vecs.len() <= i {
+            vecs.resize(i + 1, Vec::new());
+        }
+        vecs[i] = samples;
         self
     }
 
@@ -136,6 +150,7 @@ impl FlightData {
             Channel::Throttle => self.rc_command[THROTTLE].as_deref(),
             Channel::Debug(i) => self.debug.get(i)?.as_deref(),
             Channel::Motor(i) => self.motors.get(i).map(Vec::as_slice),
+            Channel::Rpm(i) => self.rpm.get(i).map(Vec::as_slice),
             Channel::Vbat => self.vbat.as_deref(),
             Channel::Current => self.current.as_deref(),
             Channel::Rssi => self.rssi.as_deref(),
@@ -214,6 +229,11 @@ impl FlightData {
 
     pub fn setpoint(&self, axis: Axis) -> Option<&[f64]> {
         self.channel(Channel::Setpoint(axis))
+    }
+
+    /// How many motors reported `eRPM`. Zero without bidirectional DShot.
+    pub fn rpm_count(&self) -> usize {
+        self.rpm.len()
     }
 
     pub fn debug(&self, index: usize) -> Option<&[f64]> {
@@ -316,6 +336,14 @@ impl Trimmed<'_> {
         self.channel(Channel::Throttle)
     }
 
+    pub fn rpm_count(&self) -> usize {
+        self.fd.rpm_count()
+    }
+
+    pub fn debug_axis(&self, axis: Axis) -> Option<&[f64]> {
+        self.channel(Channel::Debug(axis.index()))
+    }
+
     pub fn sample_rate_hz(&self) -> f64 {
         self.fd.sample_rate_hz()
     }
@@ -365,6 +393,7 @@ mod test {
         let fd = FlightData::default().with_channel(Channel::Debug(99), vec![1.0]);
         assert_eq!(fd.debug(99), None);
         assert_eq!(fd.channel(Channel::Motor(9)), None);
+        assert_eq!(fd.channel(Channel::Rpm(9)), None);
     }
 
     /// Logs start at an arbitrary flight-controller uptime, not at zero.

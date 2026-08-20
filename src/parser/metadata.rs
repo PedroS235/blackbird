@@ -174,6 +174,11 @@ impl std::fmt::Display for RateConfig {
     }
 }
 
+/// Betaflight's default, and what both repository fixtures were flown on. A
+/// wrong pole count is wrong by an obvious integer factor, which a pilot
+/// spots; refusing to draw the harmonics teaches nothing.
+pub const DEFAULT_MOTOR_POLES: f32 = 14.0;
+
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub file_name: String,
@@ -192,4 +197,70 @@ pub struct Metadata {
     pub debug_mode: String,
     /// Passthrough for all non-standard headers (PIDs, filter settings, rates, etc.)
     pub raw_headers: HashMap<String, String>,
+}
+
+impl Metadata {
+    /// Motor pole count, from the raw header passthrough — the first consumer
+    /// of it, and not worth a typed field until there is a second.
+    pub fn motor_poles(&self) -> f32 {
+        self.raw_headers
+            .get("motor_poles")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|&p| p > 0.0)
+            .unwrap_or(DEFAULT_MOTOR_POLES)
+    }
+
+    /// Whether `debug[0..3]` is the dynamic notch tracker's centre frequency.
+    /// One rule, read by the spectrogram overlay and the PSD's traced centre
+    /// alike — two copies of it would drift apart.
+    pub fn logs_dyn_notch_trace(&self) -> bool {
+        self.debug_mode == "FFT_FREQ"
+    }
+
+    /// `eRPM` is electrical RPM in hundreds; a motor turns once per pole pair,
+    /// and the spectrum is in hertz.
+    pub fn erpm_to_hz(&self, erpm: f64) -> f64 {
+        erpm * 100.0 / (self.motor_poles() as f64 / 2.0) / 60.0
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn with_headers(pairs: &[(&str, &str)]) -> Metadata {
+        Metadata {
+            raw_headers: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 4000 eRPM on a 14-pole motor: 400 000 electrical RPM over seven pole
+    /// pairs is 57 143 mechanical RPM, or 952 Hz.
+    #[test]
+    fn erpm_converts_to_hertz_through_the_pole_count() {
+        let hz = with_headers(&[("motor_poles", "14")]).erpm_to_hz(4000.0);
+        assert!((hz - 952.38).abs() < 0.01, "{hz} Hz");
+    }
+
+    /// Half the poles, twice the mechanical speed for the same eRPM.
+    #[test]
+    fn a_seven_pole_pair_motor_and_a_three_and_a_half_differ_by_the_ratio() {
+        let seven = with_headers(&[("motor_poles", "14")]).erpm_to_hz(4000.0);
+        let fourteen = with_headers(&[("motor_poles", "7")]).erpm_to_hz(4000.0);
+
+        assert!((fourteen / seven - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_missing_or_zero_pole_count_falls_back_to_the_betaflight_default() {
+        assert_eq!(Metadata::default().motor_poles(), DEFAULT_MOTOR_POLES);
+        assert_eq!(
+            with_headers(&[("motor_poles", "0")]).motor_poles(),
+            DEFAULT_MOTOR_POLES
+        );
+    }
 }

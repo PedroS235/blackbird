@@ -10,7 +10,7 @@ use crate::parser::Axis;
 /// directly against the noise band it's supposed to be following.
 pub(super) fn rows<'a>(ctx: &TabCtx<'a>) -> Vec<HeatmapRow<'a>> {
     let fd = ctx.flight;
-    let has_dyn_notch_trace = ctx.metadata.debug_mode == "FFT_FREQ" && fd.has_debug_axes();
+    let has_dyn_notch_trace = ctx.metadata.logs_dyn_notch_trace() && fd.has_debug_axes();
     let t0 = fd.start_us();
 
     Axis::ALL

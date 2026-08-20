@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use blackbird::analysis::NoStepResponse;
+use blackbird::analysis::{
+    FilterLoop, FilterOverlay, HarmonicBand, NoStepResponse, OverlayFamily, OverlayShape,
+};
 use blackbird::loader::{CancelToken, LoadEvent, LoadedLog, LogLoader};
 use blackbird::parser::metadata::RateType;
 use blackbird::parser::{Axis, LogFile};
@@ -70,6 +72,142 @@ fn analysis_runs_at_load_time() {
     let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
     let spectral = &loaded.analysis[0].spectral;
     assert!(spectral.axis(Axis::Roll).is_some());
+}
+
+fn overlays(events: Vec<LoadEvent>) -> Vec<FilterOverlay> {
+    ready(events).analysis[0].spectral.overlays.clone()
+}
+
+fn family(overlays: &[FilterOverlay], family: OverlayFamily) -> Vec<&FilterOverlay> {
+    overlays.iter().filter(|o| o.family == family).collect()
+}
+
+/// `eRPM` reaches the plot as bands at the frequencies the motors actually
+/// turned: four motors, and three orders because the fixture configured three
+/// RPM filter harmonics.
+#[test]
+fn a_fixtures_motors_become_harmonic_bands_at_their_own_frequencies() {
+    let overlays = overlays(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let [harmonics] = family(&overlays, OverlayFamily::Harmonics)[..] else {
+        panic!("the fixture logs eRPM, so it has motor harmonics");
+    };
+    let OverlayShape::Harmonics(bands) = &harmonics.shape else {
+        panic!("harmonics are a harmonic group");
+    };
+
+    assert_eq!(bands.len(), 12, "four motors at three orders");
+    assert!(bands.iter().all(|b| b.filtered), "weights are 90,50,90");
+
+    let motor_zero: Vec<&HarmonicBand> = bands.iter().filter(|b| b.motor == 0).collect();
+    let fundamental = motor_zero[0];
+
+    // A hovering quad's motors turn somewhere between a lazy idle and full
+    // song; anything outside this is a pole count or a unit gone wrong.
+    assert!(
+        (60.0..600.0).contains(&fundamental.low_hz),
+        "fundamental at {:.0}..{:.0} Hz",
+        fundamental.low_hz,
+        fundamental.high_hz
+    );
+    assert!(fundamental.high_hz > fundamental.low_hz);
+
+    // The third harmonic is three times the first, per motor.
+    assert!((motor_zero[2].low_hz - 3.0 * fundamental.low_hz).abs() < 1e-6);
+}
+
+/// A harmonic whose RPM filter weight is zero is tracked and not attenuated,
+/// and the geometry has to say which is which. One of the `.bbl` fixture's
+/// eight flights was flown on weights `100,0,80`.
+#[test]
+#[ignore]
+fn a_zero_weight_harmonic_is_marked_unfiltered_end_to_end() {
+    let loaded = ready(load(&LogLoader::default(), "eight_logs_in_one.bbl"));
+
+    let unfiltered: Vec<u32> = loaded
+        .analysis
+        .iter()
+        .flat_map(|a| &a.spectral.overlays)
+        .filter_map(|o| match &o.shape {
+            OverlayShape::Harmonics(bands) => Some(bands),
+            _ => None,
+        })
+        .flatten()
+        .filter(|b| !b.filtered)
+        .map(|b| b.order)
+        .collect();
+
+    assert!(
+        unfiltered.iter().all(|&order| order == 2),
+        "only the second harmonic was zero-weighted: {unfiltered:?}"
+    );
+    assert!(!unfiltered.is_empty(), "no zero-weight harmonic was found");
+}
+
+/// The dynamic notch is drawn as the range it may reach, and — this fixture
+/// was flown in `FFT_FREQ` — as where the tracker actually sat.
+#[test]
+fn a_fft_freq_fixture_carries_both_the_configured_range_and_the_traced_centre() {
+    let overlays = overlays(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let dyn_notch = family(&overlays, OverlayFamily::DynNotch);
+
+    assert_eq!(
+        dyn_notch[0].shape,
+        OverlayShape::Band {
+            low_hz: 90.0,
+            high_hz: 400.0
+        }
+    );
+    // Two notches configured, one centre logged — the label says so.
+    assert_eq!(dyn_notch[0].label, "Dyn notch range (×2)");
+
+    let OverlayShape::Traced(per_axis) = &dyn_notch[1].shape else {
+        panic!("a log flown in FFT_FREQ carries the traced centre");
+    };
+    let roll = per_axis[Axis::Roll].as_ref().expect("roll was traced");
+    assert!((roll.weight.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    assert!(roll.freq_hz.first().is_some_and(|&f| f > 90.0));
+    assert!(roll.freq_hz.last().is_some_and(|&f| f < 400.0));
+}
+
+/// The negative case: flown in another debug mode, `debug[0..3]` is something
+/// else, and the overlay degrades to the configured range rather than
+/// disappearing.
+#[test]
+#[ignore]
+fn a_log_flown_in_another_debug_mode_still_gets_the_configured_range() {
+    let loaded = ready(load(&LogLoader::default(), "eight_logs_in_one.bbl"));
+    let overlays = &loaded.analysis[0].spectral.overlays;
+
+    assert!(!loaded.logs[0].metadata.logs_dyn_notch_trace());
+    let dyn_notch = family(overlays, OverlayFamily::DynNotch);
+    assert_eq!(dyn_notch.len(), 1, "the range, and no trace");
+    assert!(matches!(dyn_notch[0].shape, OverlayShape::Band { .. }));
+}
+
+/// A dynamic lowpass is the range its cutoff swept, not the ceiling — this
+/// fixture ran gyro LPF1 dynamic across 250..500 Hz.
+#[test]
+fn a_dynamic_lowpass_reaches_the_plot_as_its_range() {
+    let overlays = overlays(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let gyro = family(&overlays, OverlayFamily::Lowpass(FilterLoop::Gyro));
+
+    assert_eq!(
+        gyro[0].shape,
+        OverlayShape::Band {
+            low_hz: 250.0,
+            high_hz: 500.0
+        }
+    );
+    assert_eq!(gyro[1].shape, OverlayShape::Line { hz: 500.0 });
+}
+
+/// A notch that was never enabled is not a filter at zero hertz.
+#[test]
+fn notches_the_pilot_never_enabled_are_not_drawn() {
+    let overlays = overlays(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+
+    assert!(family(&overlays, OverlayFamily::Notch(FilterLoop::Gyro)).is_empty());
+    assert!(family(&overlays, OverlayFamily::Notch(FilterLoop::Dterm)).is_empty());
 }
 
 /// The knob the UI used to have no way to reach: raising the peak floor above

@@ -1,8 +1,8 @@
 use egui::{Color32, RichText, Ui, Vec2b};
-use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Text, VLine};
+use egui_plot::{Line, Plot, PlotPoint, PlotPoints, Span, Text, VLine};
 
 use super::{PEAK_MARKER_COLOR, drawn_axes};
-use crate::analysis::SpectralAnalysis;
+use crate::analysis::{FilterLoop, OverlayFamily, OverlayShape, SpectralAnalysis};
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
 use crate::parser::{Axis, PerAxis};
@@ -64,15 +64,24 @@ impl Psd {
                         );
                     }
 
-                    for marker in analysis
-                        .filter_markers
-                        .iter()
-                        .filter(|m| m.label.starts_with("Gyro"))
-                    {
-                        plot_ui.vline(
-                            VLine::new(marker.label.clone(), marker.center_hz as f64)
-                                .color(FILTER_MARKER_COLOR),
-                        );
+                    for overlay in analysis.overlays.iter().filter(|o| {
+                        matches!(
+                            o.family,
+                            OverlayFamily::Notch(FilterLoop::Gyro)
+                                | OverlayFamily::Lowpass(FilterLoop::Gyro)
+                                | OverlayFamily::DynNotch
+                        )
+                    }) {
+                        match &overlay.shape {
+                            OverlayShape::Line { hz } => plot_ui.vline(
+                                VLine::new(overlay.label.clone(), *hz).color(FILTER_MARKER_COLOR),
+                            ),
+                            OverlayShape::Band { low_hz, high_hz } => plot_ui.span(
+                                Span::new(overlay.label.clone(), *low_hz..=*high_hz)
+                                    .border_color(FILTER_MARKER_COLOR),
+                            ),
+                            _ => {}
+                        }
                     }
 
                     for peak in &spec.peaks {
