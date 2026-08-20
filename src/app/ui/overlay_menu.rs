@@ -1,45 +1,63 @@
-//! Which reference overlays the pilot has asked to see, and the dropdown that
-//! asks.
+//! Which reference overlays the pilot has asked to see, and the row of toggles
+//! that asks.
 //!
-//! A dropdown rather than an inline row: the vertical space above the plots is
-//! divided between three stacked axes, and a closed menu costs none of it.
+//! Laid out inline rather than behind a dropdown. A button that opens a menu
+//! announces nothing — a pilot has to already know the overlays exist to go
+//! looking for them, and every family is off by default, so nothing on the
+//! plot hints that there is anything to find. The row costs one line, and
+//! wraps to a second on a narrow window rather than pushing the plots down.
 
 use egui::{RichText, Ui};
-use elegance::Switch;
 
-use crate::analysis::{FilterOverlay, OverlayFamily};
+use crate::analysis::{FilterLoop, FilterOverlay, OverlayFamily};
 
-/// Menu order is `OverlayFamily::ALL`'s order, and a family's position in it
-/// is that family's visibility flag — so a family the analysis can produce
-/// always has a switch, and no two families can share one.
+/// Row order is `OverlayFamily::ALL`'s order, and a family's position in it is
+/// that family's visibility flag — so a family the analysis can produce always
+/// has a toggle, and no two families can share one.
 const MENU_ORDER: [OverlayFamily; OverlayFamily::ALL.len()] = OverlayFamily::ALL;
 
-/// The heading the switch sits under. The gyro and D-term switches of one
-/// filter share theirs.
-fn section_of(family: OverlayFamily) -> &'static str {
+/// The toggle's label. Short, because seven of them share a row: enough to
+/// name the filter, with the detail left to the hover.
+fn title(family: OverlayFamily) -> String {
     match family {
-        OverlayFamily::Harmonics => "Harmonics",
-        OverlayFamily::DynNotch => "Dyn notch",
-        OverlayFamily::Notch(_) => "Static notches",
-        OverlayFamily::Lowpass(_) => "LPFs",
+        OverlayFamily::Harmonics => "Harmonics".to_string(),
+        OverlayFamily::DynNotch => "Dyn notch".to_string(),
+        OverlayFamily::Notch(l) => format!("{} notch", l.name()),
+        OverlayFamily::Lowpass(l) => format!("{} LPF", l.name()),
     }
 }
 
-/// The switch's label. Under a section heading that already names the filter,
-/// what is left to say is which loop it feeds.
-fn title(family: OverlayFamily) -> String {
+/// What the toggle draws, for the hover — the row has no space to say it and a
+/// pilot should not have to turn one on to find out.
+fn description(family: OverlayFamily) -> &'static str {
     match family {
-        OverlayFamily::Harmonics => "Show motor harmonics".to_string(),
-        OverlayFamily::DynNotch => "Show configured range and traced centre".to_string(),
-        OverlayFamily::Notch(l) | OverlayFamily::Lowpass(l) => l.name().to_string(),
+        OverlayFamily::Harmonics => {
+            "A band per motor per harmonic order, over the frequencies each motor reached."
+        }
+        OverlayFamily::DynNotch => {
+            "The range the dynamic notch may work in, and — where the log was flown in FFT_FREQ \
+             — what it actually took off, averaged over the centres its tracker chose."
+        }
+        OverlayFamily::Notch(l) => match l {
+            FilterLoop::Gyro => "What each static gyro notch removes, at the depth its Q gives.",
+            FilterLoop::Dterm => "What each static D-term notch removes, at the depth its Q gives.",
+        },
+        OverlayFamily::Lowpass(l) => match l {
+            FilterLoop::Gyro => "How the gyro lowpass stages roll off, at the cutoffs they ran at.",
+            FilterLoop::Dterm => {
+                "How the D-term lowpass stages roll off, at the cutoffs they ran at."
+            }
+        },
     }
 }
 
 /// Detected noise peaks are not a filter — nothing configured them, the
-/// analysis found them — so they are not an `OverlayFamily`. They get a switch
+/// analysis found them — so they are not an `OverlayFamily`. They get a toggle
 /// beside the families because to a pilot they are one more thing drawn over
 /// the curve, and user story 1 asks for a panel that opens with none of it.
-const PEAKS_TITLE: &str = "Show detected peaks";
+const PEAKS_TITLE: &str = "Peaks";
+const PEAKS_DESCRIPTION: &str = "The loudest noise peaks the analysis found, the three strongest labelled with what the \
+     filters took off them.";
 const NO_PEAKS: &str =
     "Nothing in this log rose far enough above the noise floor to be reported as a peak.";
 
@@ -88,55 +106,75 @@ impl OverlayVisibility {
     pub(in crate::app) fn shows_peaks(&self) -> bool {
         self.peaks
     }
-
-    fn enabled_count(&self) -> usize {
-        self.families.iter().filter(|&&on| on).count() + usize::from(self.peaks)
-    }
 }
 
-/// The dropdown. A family the log cannot fill greys out with the reason,
+/// The toggle row. A family the log cannot fill greys out with the reason,
 /// rather than vanishing — the same law the tab bar is held to.
+///
+/// Wrapped, so a narrow window costs a second line rather than clipping a
+/// toggle the pilot then cannot find.
 pub(in crate::app) fn show(
     ui: &mut Ui,
     visibility: &mut OverlayVisibility,
     overlays: &[FilterOverlay],
     has_peaks: bool,
 ) {
-    let label = match visibility.enabled_count() {
-        0 => "Overlays".to_string(),
-        n => format!("Overlays ({n})"),
-    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Overlays").weak());
 
-    ui.menu_button(label, |ui| {
-        ui.label(RichText::new("Peaks").strong());
-        let peaks = ui.add_enabled(has_peaks, Switch::new(&mut visibility.peaks, PEAKS_TITLE));
-        if !has_peaks {
-            peaks.on_disabled_hover_text(NO_PEAKS);
-        }
+        toggle(
+            ui,
+            &mut visibility.peaks,
+            PEAKS_TITLE,
+            has_peaks,
+            |on| match on {
+                true => PEAKS_DESCRIPTION.to_string(),
+                false => NO_PEAKS.to_string(),
+            },
+        );
 
-        let mut section = None;
         for family in MENU_ORDER {
-            // One heading per family, so the gyro and D-term switches read as
-            // two views of one filter rather than four unrelated toggles.
-            if section != Some(section_of(family)) {
-                section = Some(section_of(family));
-                ui.label(RichText::new(section_of(family)).strong());
-            }
-
             let available = overlays.iter().any(|o| o.family == family);
-            let entry = ui.add_enabled(
-                available,
-                Switch::new(&mut visibility.families[flag(family)], title(family)),
-            );
+            let flag = flag(family);
 
-            if !available {
-                // The disabled variant, not `on_hover_text`: egui gates that
-                // one on the widget being enabled, so a greyed switch would
-                // state no reason at all.
-                entry.on_disabled_hover_text(unavailable_reason(family));
-            }
+            toggle(
+                ui,
+                &mut visibility.families[flag],
+                &title(family),
+                available,
+                |on| match on {
+                    true => description(family).to_string(),
+                    false => unavailable_reason(family).to_string(),
+                },
+            );
         }
     });
+}
+
+/// One overlay's toggle: filled while it is drawing, outlined while it is not,
+/// so the row reads as a set of states rather than a set of buttons.
+fn toggle(
+    ui: &mut Ui,
+    on: &mut bool,
+    label: &str,
+    available: bool,
+    hover: impl Fn(bool) -> String,
+) {
+    let button = match *on {
+        true => elegance::Button::new(label),
+        false => elegance::Button::new(label).outline(),
+    };
+    let response = ui.add_enabled(available, button);
+
+    if response.clicked() {
+        *on = !*on;
+    }
+    match available {
+        true => response.on_hover_text(hover(true)),
+        // The disabled variant, not `on_hover_text`: egui gates that one on the
+        // widget being enabled, so a greyed toggle would state no reason at all.
+        false => response.on_disabled_hover_text(hover(false)),
+    };
 }
 
 #[cfg(test)]
@@ -152,7 +190,6 @@ mod test {
 
         assert!(MENU_ORDER.iter().all(|&f| !visibility.shows(f)));
         assert!(!visibility.shows_peaks());
-        assert_eq!(visibility.enabled_count(), 0);
     }
 
     /// Families are indexed by position in `MENU_ORDER`, so no two share a
@@ -165,7 +202,7 @@ mod test {
 
         assert!(visibility.shows(OverlayFamily::DynNotch));
         assert!(!visibility.shows(OverlayFamily::Harmonics));
-        assert_eq!(visibility.enabled_count(), 1);
+        assert!(!visibility.shows_peaks());
     }
 
     /// Peaks are not a filter family, and toggling them must not move one.
@@ -178,7 +215,24 @@ mod test {
 
         assert!(visibility.shows_peaks());
         assert!(MENU_ORDER.iter().all(|&f| !visibility.shows(f)));
-        assert_eq!(visibility.enabled_count(), 1);
+    }
+
+    /// Seven toggles share one row, so none of them may be a sentence. The
+    /// detail lives in the hover, which every one of them has.
+    #[test]
+    fn every_toggle_is_short_enough_to_share_a_row_and_says_more_on_hover() {
+        for family in MENU_ORDER {
+            let title = title(family);
+            assert!(title.len() <= 14, "{title:?} is too long for the row");
+            assert!(
+                !description(family).is_empty(),
+                "{title:?} explains nothing"
+            );
+            assert!(!unavailable_reason(family).is_empty());
+        }
+
+        assert!(PEAKS_TITLE.len() <= 14);
+        assert!(!PEAKS_DESCRIPTION.is_empty());
     }
 
     /// Both loops of a family are separately toggleable — a pilot looking at

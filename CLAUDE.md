@@ -265,7 +265,7 @@ load, and storing it puts the feature behind the loader integration seam.
   raw header passthrough, defaulting to Betaflight's 14
 - Overlay visibility is UI state (`ui::overlay_menu::OverlayVisibility`), a
   shared type with a separate instance per sub-tab, every family off by
-  default. Toggling one never recomputes anything. Detected peaks get a switch
+  default, toggled from an inline wrapped row above the plots. Toggling one never recomputes anything. Detected peaks get a switch
   there too, and default off with the rest — they are not a filter and so not
   an `OverlayFamily`, but to a pilot they are one more thing drawn over the
   curve
@@ -438,7 +438,7 @@ _(none yet — project is in initial setup)_
 | Flights are named by `LogId`, never by index | `LogStore::remove` shifts every later index, and panel state the store cannot see would then redraw a different file under the old label |
 | Panels reach other flights through a read-only catalog on `TabCtx` | A panel handed `&LogStore` could `select` or `remove` mid-frame while the sidepanel iterates it |
 | Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
-| Overlays default to off, behind one dropdown | The panel opens as a clean spectrum. Every mark over the curve is one the pilot asked for, and a closed dropdown costs none of the vertical space three stacked axes need |
+| Overlays default to off, behind an inline toggle row | The panel opens as a clean spectrum, so every mark over the curve is one the pilot asked for. The toggles are laid out inline rather than in a dropdown: a button that opens a menu announces nothing, and with every family off there is no mark on the plot to hint that more exists. One wrapped row is the whole cost |
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
 | AI as trait with two backends | Anthropic for quality, Ollama for offline/privacy. Swappable at runtime |
 | `prompt.rs` isolated from API plumbing | Prompt is a product decision iterated independently of transport code |

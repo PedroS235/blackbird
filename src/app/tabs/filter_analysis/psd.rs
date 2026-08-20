@@ -45,7 +45,7 @@ pub(super) struct Psd {
 impl Psd {
     pub(super) fn show(&mut self, ui: &mut Ui, analysis: &SpectralAnalysis) {
         // A log whose peaks all sat inside the noise floor cannot fill the
-        // peaks switch either, and it greys out like any other.
+        // peaks toggle either, and it greys out like any other.
         let has_peaks = Axis::ALL
             .iter()
             .filter_map(|&axis| analysis.axis(axis))
@@ -53,8 +53,9 @@ impl Psd {
         overlay_menu::show(ui, &mut self.overlays, &analysis.overlays, has_peaks);
         ui.add_space(4.0);
 
-        // After the menu, and over the axes that draw: measuring first would
-        // size the plots against height the menu row then took.
+        // After the toggle row, and over the axes that draw: measuring first
+        // would size the plots against height the row then took — including
+        // the second line it wraps onto on a narrow window.
         let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
         let palette = colors::palette(ui.ctx());
         let visible: Vec<&FilterOverlay> = analysis
