@@ -1,4 +1,4 @@
-use egui::{Align2, Color32, RichText, Ui, Vec2b};
+use egui::{Align2, RichText, Ui, Vec2b};
 use egui_plot::{HLine, Line, Plot, PlotPoint, PlotPoints, PlotUi, Span, Text, VLine};
 use elegance::Palette;
 
@@ -13,6 +13,7 @@ use crate::app::ui::harmonic_key;
 use crate::app::ui::hover;
 use crate::app::ui::overlay_menu::{self, OverlayVisibility};
 use crate::parser::{Axis, PerAxis};
+use crate::signal::fft::Psd as PsdData;
 
 /// How many peaks carry a written label. The rest are drawn as bare lines:
 /// past three the labels overlap each other and the curve underneath, and the
@@ -22,6 +23,11 @@ const LABELLED_PEAKS: usize = 3;
 /// Fill alpha for a band the filter is actually attenuating. Low enough that
 /// the curve reads through a stack of overlapping harmonics.
 const BAND_FILL_ALPHA: u8 = 28;
+
+/// A harmonic's stretch is drawn over the raw trace, so it is drawn thicker —
+/// at the same width the recolour would read as the curve rather than as a mark
+/// on it.
+const HARMONIC_WIDTH: f32 = 2.0;
 
 /// The traced response is a gain curve, and the plot's y axis is signal power.
 /// Its zero is pinned to the loudest bin of this axis's own spectrum, so the V
@@ -141,7 +147,7 @@ impl Psd {
 
                     let anchor_db = response_anchor_db(spec);
                     for overlay in &visible {
-                        draw_overlay(plot_ui, &palette, overlay, axis, anchor_db);
+                        draw_overlay(plot_ui, &palette, overlay, axis, anchor_db, &spec.raw_psd);
                     }
                     if self.overlays.shows_peaks() {
                         draw_peaks(plot_ui, &palette, spec);
@@ -175,6 +181,7 @@ fn draw_overlay(
     overlay: &FilterOverlay,
     axis: Axis,
     anchor_db: f64,
+    psd: &PsdData,
 ) {
     let color = colors::filter_color(palette);
 
@@ -187,7 +194,7 @@ fn draw_overlay(
                 .fill(color.gamma_multiply_u8(BAND_FILL_ALPHA))
                 .border_color(color),
         ),
-        OverlayShape::Harmonics(bands) => draw_harmonics(plot_ui, palette, bands),
+        OverlayShape::Harmonics(bands) => draw_harmonics(plot_ui, palette, bands, psd),
         OverlayShape::Response(response) => {
             draw_response(plot_ui, palette, response, anchor_db, &overlay.label)
         }
@@ -199,23 +206,65 @@ fn draw_overlay(
     }
 }
 
-/// One unfilled span per motor per order: hue is the motor, border style is the
-/// order. Unfilled because twelve fills over a spectrum leave nothing of the
-/// curve the pilot came to read — and because a peak has to be visibly *outside*
-/// these spans for the overlay to say anything, which a wash of translucent
-/// bands cannot do.
+/// The spectrum's own curve, recoloured over the frequencies each motor spent
+/// the flight at: hue is the motor, style is the order.
+///
+/// Not a span. Twelve of those are twenty-four vertical edges, and a pilot
+/// reads a bracket as a boundary rather than as noise — while every point of
+/// the recoloured run is measured data, saying *this part of your spectrum is
+/// motor 3's second harmonic*. A peak with no coloured run over it is a peak no
+/// motor explains, which is the whole reason the bands were narrowed.
 ///
 /// No in-plot labels. The key is the legend row above the plots; twelve names
 /// drawn on the curve would bury it.
-fn draw_harmonics(plot_ui: &mut PlotUi<'_>, palette: &Palette, bands: &[HarmonicBand]) {
+fn draw_harmonics(
+    plot_ui: &mut PlotUi<'_>,
+    palette: &Palette,
+    bands: &[HarmonicBand],
+    psd: &PsdData,
+) {
     for band in bands {
-        plot_ui.span(
-            Span::new(String::new(), band.low_hz..=band.high_hz)
-                .fill(Color32::TRANSPARENT)
-                .border_color(harmonic_key::band_color(palette, band))
-                .border_style(harmonic_key::order_style(band.order)),
+        let Some(run) = spectrum_run(psd, band) else {
+            continue;
+        };
+        plot_ui.line(
+            Line::new(harmonic_key::band_name(band), run)
+                .color(harmonic_key::band_color(palette, band))
+                .style(harmonic_key::order_style(band.order))
+                .width(HARMONIC_WIDTH),
         );
     }
+}
+
+/// The spectrum's points across one band, or `None` where the band falls
+/// outside the spectrum entirely — a third harmonic past Nyquist has no curve
+/// to recolour.
+///
+/// Widened by a bin either side: a motor that held one frequency has a band
+/// narrower than the FFT's resolution, and a run of one point draws nothing at
+/// all.
+fn spectrum_run(psd: &PsdData, band: &HarmonicBand) -> Option<PlotPoints<'static>> {
+    let n = psd.freq_hz.len().min(psd.power_db.len());
+    let freq = psd.freq_hz.get(..n)?;
+    if n < 2 || band.low_hz > freq[n - 1] || band.high_hz < freq[0] {
+        return None;
+    }
+
+    let start = freq
+        .partition_point(|&f| f < band.low_hz)
+        .saturating_sub(1)
+        .min(n - 2);
+    let end = (freq.partition_point(|&f| f <= band.high_hz) + 1)
+        .max(start + 2)
+        .min(n);
+
+    Some(
+        freq[start..end]
+            .iter()
+            .zip(&psd.power_db[start..end])
+            .map(|(&f, &v)| [f, v])
+            .collect(),
+    )
 }
 
 /// What a filter actually took off, as the shape it really has.
@@ -411,7 +460,6 @@ mod test {
     }
 
     fn spectral_with(peaks: Vec<FrequencyPeak>) -> AxisSpectral {
-        use crate::signal::fft::Psd as PsdData;
         let empty = || PsdData {
             freq_hz: Vec::new().into(),
             power_db: Vec::new(),
@@ -484,6 +532,63 @@ mod test {
     #[test]
     fn a_labelled_peak_states_what_the_filters_took_off_it() {
         assert_eq!(peak_label(&peak(212.0, None)), "212 Hz · 7 dB filtered");
+    }
+
+    /// 100 Hz bins from 0 to 900.
+    fn psd() -> PsdData {
+        PsdData {
+            freq_hz: (0..10).map(|i| i as f64 * 100.0).collect::<Vec<_>>().into(),
+            power_db: (0..10).map(|i| -(i as f64)).collect(),
+        }
+    }
+
+    fn band(low_hz: f64, high_hz: f64) -> HarmonicBand {
+        HarmonicBand {
+            motor: 0,
+            order: 1,
+            low_hz,
+            high_hz,
+            filtered: true,
+        }
+    }
+
+    fn xs(points: PlotPoints<'_>) -> Vec<f64> {
+        points.points().iter().map(|p| p.x).collect()
+    }
+
+    /// The mark is the spectrum's own points, so what it says about the noise
+    /// at a frequency is what the curve underneath says.
+    #[test]
+    fn a_bands_mark_is_the_spectrums_own_points_across_it() {
+        let run = spectrum_run(&psd(), &band(250.0, 450.0)).expect("the band is in range");
+
+        // Widened a bin either side of the bins *inside* the band, so the mark
+        // reaches past 250 and 450 rather than stopping short of them.
+        assert_eq!(xs(run), vec![200.0, 300.0, 400.0, 500.0]);
+    }
+
+    /// A motor that held one frequency has a band narrower than the FFT's
+    /// resolution. A single point draws nothing, so the run is still a segment.
+    #[test]
+    fn a_band_narrower_than_a_bin_still_draws_a_segment() {
+        let run = spectrum_run(&psd(), &band(310.0, 320.0)).expect("the band is in range");
+        assert!(xs(run).len() >= 2);
+    }
+
+    /// A third harmonic past Nyquist has no curve to recolour, and inventing
+    /// one at the edge would put a mark where nothing was measured.
+    #[test]
+    fn a_band_off_the_end_of_the_spectrum_draws_nothing() {
+        assert!(spectrum_run(&psd(), &band(2000.0, 3000.0)).is_none());
+        assert!(spectrum_run(&psd(), &band(-200.0, -100.0)).is_none());
+    }
+
+    /// A band reaching past the last bin is cut to the spectrum rather than
+    /// indexing off the end of it.
+    #[test]
+    fn a_band_overhanging_the_last_bin_is_cut_to_the_spectrum() {
+        let run = spectrum_run(&psd(), &band(800.0, 5000.0)).expect("the band starts in range");
+        assert_eq!(xs(run).last().copied(), Some(900.0));
     }
 
     /// A filter chain that leaves a peak louder than it found it says so,

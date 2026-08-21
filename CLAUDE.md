@@ -271,10 +271,16 @@ load, and storing it puts the feature behind the loader integration seam.
   diagnosis — a bent shaft, a chipped prop, a dying bearing — and nothing else
   on the plot says it. Four hues, cycled so a hex still draws. A tracked but
   zero-weight order keeps its identity and is dimmed
-- The PSD draws the bands as **unfilled** spans with no in-plot labels, keyed
-  by a legend row that appears above the plots only while the family is on.
-  Twelve fills leave nothing of the curve, and a peak has to be visibly
-  *outside* a band for the overlay to say anything
+- The PSD draws each band as **the spectrum's own curve, recoloured** across
+  those frequencies — not a span. Twelve spans are twenty-four vertical edges,
+  and a bracket reads as a boundary rather than as noise; every point of a
+  recoloured run is measured data, saying *this part of your spectrum is motor
+  3's second harmonic*. A peak with no coloured run over it is a peak no motor
+  explains, which is what narrowing the bands was for. Drawn thicker than the
+  raw trace, widened by an FFT bin either side so a motor that held one
+  frequency still draws a segment, and skipped where the band falls off the end
+  of the spectrum. No in-plot labels: a legend row above the plots keys them
+  while the family is on
 - The Spectrogram draws the same identities as **curves of frequency against
   time** — the PIDToolbox view. Built per frame from `eRPM` rather than stored:
   the panel already holds the flight data, and the series borrows the samples
@@ -567,6 +573,7 @@ _(none yet — project is in initial setup)_
 | Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
 | Overlays default to off, behind an inline toggle row | The panel opens as a clean spectrum, so every mark over the curve is one the pilot asked for. The toggles are laid out inline rather than in a dropdown: a button that opens a menu announces nothing, and with every family off there is no mark on the plot to hint that more exists. One wrapped row is the whole cost |
 | Harmonic identity is hue-per-motor plus style-per-order | Order is derivable — the second harmonic is at twice the first and the pilot can see that. Which motor is loud is not derivable and is the diagnosis. Colouring by order spent the only distinguishing channel on the less useful of the two facts, and left four motors indistinguishable |
+| A harmonic is drawn as a recoloured stretch of the spectrum, not a band | Twelve spans were twenty-four vertical edges over the curve the pilot came to read, and a bracket says "boundary" where the question is "how loud". Recolouring the real curve makes every drawn point measured data, and leaves a peak no motor explains with no colour over it |
 | Harmonic bands are a percentile, not an extent | On any real freestyle log the full min..max runs idle to full song, so three orders of it overlap into a wash that covers most of the spectrum. Every peak lands inside one, so every peak looks motor-explained and the overlay says nothing |
 | Spectrogram harmonics are built per frame, not stored | The panel already holds the flight data, and the dynamic notch trace set the precedent. The series borrows eRPM as logged and carries a `scale` applied after decimation — min-max decimation commutes with a positive scale, so nothing is copied per frame |
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
