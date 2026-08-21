@@ -6,6 +6,7 @@ use super::drawn_axes;
 use crate::analysis::SpectralAnalysis;
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
+use crate::app::ui::hover;
 use crate::parser::{Axis, PerAxis};
 
 /// Welch-averaged linear magnitude — no dB, chunked and averaged like the
@@ -49,7 +50,23 @@ impl Frequency {
                 ui.checkbox(&mut self.filtered_visible[axis], "show filtered");
             });
 
+            let mut readout_series: Vec<(String, &[f64], &[f64])> = vec![(
+                "raw".into(),
+                &raw_spectrum.freq_hz,
+                &raw_spectrum.magnitude,
+            )];
+            if self.filtered_visible[axis]
+                && let Some(filtered_spectrum) = &spec.filtered_spectrum
+            {
+                readout_series.push((
+                    "filtered".into(),
+                    &filtered_spectrum.freq_hz,
+                    &filtered_spectrum.magnitude,
+                ));
+            }
+
             Plot::new(format!("frequency_plot_{}", axis.name()))
+                .label_formatter(hover::readout("Hz", 3, readout_series))
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("magnitude")

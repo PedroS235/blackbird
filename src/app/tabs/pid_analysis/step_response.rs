@@ -10,6 +10,7 @@ use crate::app::colors;
 use crate::app::log_store::FlightKey;
 use crate::app::tabs::{TabCtx, stacked_plot_height};
 use crate::app::ui::compare::{self, CompareSet};
+use crate::app::ui::hover;
 use crate::parser::{Axis, FlightData};
 
 /// Individual traces are background: the eye should read the spread as a band,
@@ -514,7 +515,19 @@ fn show_axis(
         metrics_view(metrics_rows(axis, compared), compared.len()),
     );
 
+    // One line per compared flight, at the hovered millisecond. The mean only:
+    // the faded band is the same claim already, and forty labelled traces is
+    // not a readout.
+    let readout_series: Vec<(String, &[f64], &[f64])> = compared
+        .iter()
+        .filter_map(|c| {
+            let response = c.step.axis(axis).ok()?;
+            Some((c.label.clone(), &response.time_ms[..], &response.mean[..]))
+        })
+        .collect();
+
     Plot::new(format!("step_response_plot_{}", axis.name()))
+        .label_formatter(hover::readout("ms", 3, readout_series))
         .height(height)
         .x_axis_label("ms")
         .y_axis_label("normalised")

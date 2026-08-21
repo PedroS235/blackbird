@@ -1,6 +1,7 @@
 use egui::{Color32, Id, Vec2b};
 use egui_plot::{Legend, Line, Plot, PlotMemory, PlotPoints};
 
+use crate::app::ui::hover::{hover_x, y_at_us};
 use crate::signal::timeseries::windowed_downsample;
 
 pub struct Series<'a> {
@@ -56,7 +57,24 @@ impl TimeseriesPlot<'_> {
             .center_y_axis(true)
             .auto_bounds(Vec2b::new(false, false))
             .default_y_bounds(y_min, y_max)
-            .y_axis_label(&self.y_label);
+            .y_axis_label(&self.y_label)
+            // The value on each visible trace at the hovered instant. The
+            // default label snaps to a vertex within a few pixels, which a
+            // trace downsampled to one point per column almost never has
+            // under the pointer.
+            .label_formatter(|pos| {
+                let t = hover_x(pos);
+                let mut out = format!("t = {t:.3} s");
+                for s in &self.series {
+                    if hidden.contains(&Id::new(&s.label)) {
+                        continue;
+                    }
+                    if let Some(y) = y_at_us(s.time_us, s.samples, self.t0, t) {
+                        out += &format!("\n{}: {y:.2}", s.label);
+                    }
+                }
+                Some(out)
+            });
 
         if let Some((min, max)) = self.default_x_range {
             plot = plot.default_x_bounds(min, max);

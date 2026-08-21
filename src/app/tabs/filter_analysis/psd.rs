@@ -9,6 +9,7 @@ use crate::analysis::{
 };
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
+use crate::app::ui::hover;
 use crate::app::ui::overlay_menu::{self, OverlayVisibility};
 use crate::parser::{Axis, PerAxis};
 
@@ -74,13 +75,32 @@ impl Psd {
                 ui.checkbox(&mut self.filtered_visible[axis], "show filtered");
             });
 
+            let mut readout_series: Vec<(String, &[f64], &[f64])> = vec![(
+                "raw".into(),
+                &spec.raw_psd.freq_hz,
+                &spec.raw_psd.power_db,
+            )];
+            if self.filtered_visible[axis]
+                && let Some(filtered_psd) = &spec.filtered_psd
+            {
+                readout_series.push((
+                    "filtered".into(),
+                    &filtered_psd.freq_hz,
+                    &filtered_psd.power_db,
+                ));
+            }
+
             Plot::new(plot_id(axis))
+                .label_formatter(hover::readout("Hz", 1, readout_series))
                 .height(plot_height)
                 .x_axis_label("Hz")
                 .y_axis_label("dB")
                 .allow_zoom(Vec2b::new(true, true))
                 .allow_scroll(Vec2b::new(true, false))
                 .allow_drag(Vec2b::new(true, true))
+                .show_y(true)
+                .show_x(false)
+                .show_crosshair(false)
                 .show(ui, |plot_ui| {
                     let raw_points: PlotPoints = spec
                         .raw_psd
