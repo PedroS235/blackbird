@@ -48,6 +48,7 @@ pub struct LogFile {
 impl LogFile {
     pub fn open(path: &Path) -> Result<Self, ParseError> {
         let bytes = std::fs::read(path).map_err(|e| ParseError::Io(e.to_string()))?;
+        tracing::debug!("read {} ({} bytes)", path.display(), bytes.len());
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -79,6 +80,7 @@ impl LogFile {
         log_index: usize,
         on_progress: impl FnMut(f32) -> bool,
     ) -> Result<ParsedLog, ParseError> {
+        let started = std::time::Instant::now();
         let file = blackbox_log::File::new(&self.bytes);
         let count = file.log_count();
 
@@ -88,6 +90,14 @@ impl LogFile {
                 count,
             });
         };
+
+        if let Err(e) = &parsed_header {
+            tracing::warn!(
+                "{} log {}: header rejected: {e}",
+                self.file_name,
+                log_index + 1
+            );
+        }
 
         match parsed_header {
             Ok(header) => {
@@ -99,6 +109,15 @@ impl LogFile {
                     .iter()
                     .map(|f| f.name.to_owned())
                     .collect();
+                tracing::debug!(
+                    "{} log {}: {} · {} · {} fields · debug {}",
+                    self.file_name,
+                    log_index + 1,
+                    metadata.firmware,
+                    metadata.board,
+                    field_names.len(),
+                    metadata.debug_mode,
+                );
 
                 let flight_data = build_flight_data(&mut parser, &field_names, on_progress)
                     .ok_or(ParseError::Cancelled)?;
@@ -108,6 +127,17 @@ impl LogFile {
                     .zip(flight_data.time_us.last())
                     .map(|(f, l)| Duration::from_micros(l.saturating_sub(*f)))
                     .unwrap_or(Duration::ZERO);
+
+                tracing::info!(
+                    "{} log {}: {} frames, {:.0} Hz, {:.1} s, parsed in {:.0} ms",
+                    self.file_name,
+                    log_index + 1,
+                    flight_data.time_us().len(),
+                    flight_data.sample_rate_hz(),
+                    metadata.duration.as_secs_f64(),
+                    started.elapsed().as_secs_f64() * 1e3,
+                );
+                warn_about_missing_fields(&self.file_name, log_index, &flight_data);
 
                 Ok(ParsedLog {
                     metadata,
@@ -131,6 +161,47 @@ impl LogFile {
                 }
                 e => Err(ParseError::Corrupt(e.to_string())),
             },
+        }
+    }
+}
+
+/// A log missing a field does not fail — it silently loses whatever analysis
+/// needed it, which from the panel looks like a bug rather than a Betaflight
+/// `blackbox_fields` setting. Said once here, at load, per sublog.
+fn warn_about_missing_fields(file_name: &str, log_index: usize, fd: &FlightData) {
+    let log = log_index + 1;
+    if fd.time_us().is_empty() {
+        tracing::warn!("{file_name} log {log}: no main frames decoded");
+        return;
+    }
+    if fd.sample_rate_hz() <= 0.0 {
+        tracing::warn!("{file_name} log {log}: timestamps give no sample rate — no FFT possible");
+    }
+    for (field, missing, cost) in [
+        (
+            "gyroUnfilt",
+            Axis::ALL.iter().all(|&a| fd.gyro_raw(a).is_none()),
+            "no pre-filter spectrum",
+        ),
+        (
+            "gyroADC",
+            Axis::ALL.iter().all(|&a| fd.gyro(a).is_none()),
+            "no filtered spectrum or step response",
+        ),
+        (
+            "setpoint",
+            Axis::ALL.iter().all(|&a| fd.setpoint(a).is_none()),
+            "no step response",
+        ),
+        ("throttle", fd.throttle().is_none(), "no throttle heatmap"),
+        (
+            "eRPM",
+            fd.rpm_count() == 0,
+            "no motor harmonic overlay (bidirectional DShot off?)",
+        ),
+    ] {
+        if missing {
+            tracing::warn!("{file_name} log {log}: {field} not logged — {cost}");
         }
     }
 }

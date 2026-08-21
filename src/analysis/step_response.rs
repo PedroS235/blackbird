@@ -283,8 +283,17 @@ impl StepResponseAnalyzer {
     pub fn analyze(&self, fd: &FlightData) -> StepResponseAnalysis {
         let fd = fd.trimmed(self.trim_s);
         let plan = self.plan(fd.sample_rate_hz());
+        if let Some(plan) = &plan {
+            tracing::debug!(
+                "step response: {} sample window, {} hop, {} kept, λk {}",
+                plan.window,
+                plan.hop,
+                plan.len,
+                self.lambda_k,
+            );
+        }
 
-        StepResponseAnalysis {
+        let result = StepResponseAnalysis {
             axes: PerAxis(Axis::ALL.map(|axis| {
                 let setpoint = fd.setpoint(axis).ok_or(NoStepResponse::SetpointNotLogged)?;
                 let gyro = fd.gyro(axis).ok_or(NoStepResponse::GyroNotLogged)?;
@@ -292,7 +301,17 @@ impl StepResponseAnalyzer {
 
                 self.analyze_axis(plan, setpoint, gyro)
             })),
+        };
+
+        // Per axis, either how many windows survived or why none did — the
+        // panel says the same thing, but only for the flight it is drawing.
+        for axis in Axis::ALL {
+            match result.axis(axis) {
+                Ok(step) => tracing::debug!("step response {axis:?}: {} trace(s)", step.count),
+                Err(reason) => tracing::debug!("step response {axis:?}: none — {reason:?}"),
+            }
         }
+        result
     }
 
     /// `None` when the log carries no usable sample rate, which leaves every

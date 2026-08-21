@@ -9,7 +9,6 @@ mod update;
 
 use std::{collections::VecDeque, sync::mpsc};
 
-use blackbird::version;
 use eframe::App;
 use elegance::ProgressBar;
 
@@ -37,7 +36,6 @@ pub struct BlackbirdApp {
 
 impl Default for BlackbirdApp {
     fn default() -> Self {
-        tracing::info!("Blackbird v{} app started", version::CURRENT);
         Self {
             app_name: "Blackbird",
             logs: Default::default(),
@@ -138,6 +136,7 @@ impl BlackbirdApp {
         }
 
         if finished {
+            tracing::debug!("every loader thread finished");
             self.load_state = LoadState::Idle;
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -181,12 +180,11 @@ impl BlackbirdApp {
             .add_filter("Blackbox Log", &["bbl", "bfl", "BBL", "BFL"])
             .pick_files()
         else {
+            tracing::debug!("file dialog dismissed without a selection");
             return;
         };
 
-        for path in paths.iter() {
-            tracing::info!("Loading {}", path.to_string_lossy());
-        }
+        tracing::info!("opening {} file(s) from the picker", paths.len());
 
         self.load_state = LoadState::Loading {
             handle: LogLoader::default().spawn(paths),

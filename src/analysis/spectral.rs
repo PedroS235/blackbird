@@ -131,10 +131,18 @@ impl GyroNoiseAnalyzer {
             })
         }));
 
-        SpectralAnalysis {
+        let analysis = SpectralAnalysis {
             axes,
             overlays: overlays::build(&fd, metadata),
-        }
+        };
+
+        tracing::debug!(
+            "spectral: {} samples at {fs:.0} Hz, {} overlay(s), peaks {:?}",
+            time_ref.len(),
+            analysis.overlays.len(),
+            Axis::ALL.map(|axis| analysis.axis(axis).map_or(0, |a| a.peaks.len())),
+        );
+        analysis
     }
 
     fn analyze_axis(

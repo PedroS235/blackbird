@@ -7,6 +7,12 @@ use logging::init_logging;
 
 fn main() {
     init_logging();
+    tracing::info!(
+        "Blackbird v{} starting on {}/{}",
+        version::CURRENT,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/blackbird_logo.png"))
         .expect("The icon data must be valid");
@@ -25,7 +31,7 @@ fn main() {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let run = eframe::run_native(
         "Blackbird",
         options,
         Box::new(|cc| {
@@ -33,6 +39,12 @@ fn main() {
             app::theme::install(&cc.egui_ctx);
             Ok(Box::new(app::BlackbirdApp::new(cc)))
         }),
-    )
-    .unwrap();
+    );
+
+    match run {
+        Ok(()) => tracing::info!("Blackbird exited"),
+        // The window never came up, or the event loop died. Nothing is left to
+        // show it in, so the log is the only place this can be said.
+        Err(err) => tracing::error!("Blackbird could not run: {err}"),
+    }
 }

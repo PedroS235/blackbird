@@ -333,6 +333,37 @@ where the sticks moved — the same approach as PIDToolbox and Blackbox Explorer
 
 ---
 
+### Logging
+
+`tracing` throughout, one `tracing_subscriber` installed by `logging::init_logging`
+from `main`. A pilot's bug report is a paste of this output, so it is written to
+be read by someone who is not holding the code.
+
+- **`RUST_LOG` wins whenever it is set** — `RUST_LOG=blackbird::parser=trace`
+  to chase one module, `RUST_LOG=debug` to hear eframe and wgpu too. Unset, the
+  build decides: `blackbird=debug` in a dev build, `blackbird=info` in a
+  release one. Only this crate is on by default; wgpu logs per frame and would
+  bury the lines that matter
+- **`info` is the flight's story, `debug` is the mechanism.** One `info` per
+  file opened, per sublog parsed (frames, sample rate, duration, parse ms), per
+  file finished with its total; `debug` for header contents, field count, per-
+  analyser timings and per-axis results. So the default release log reads as a
+  timeline of what the pilot did
+- **A field Betaflight never logged is a `warn`, once, at parse time**
+  (`parser::warn_about_missing_fields`): no `gyroUnfilt` means no pre-filter
+  spectrum, no `setpoint` means no step response, no `eRPM` means no harmonic
+  bands. From the panel these look like bugs rather than a `blackbox_fields`
+  setting, and the log is where that distinction can be made cheaply
+- **`warn` for what one flight lost, `error` only for what the pilot sees.**
+  A corrupt sublog in a `.bbl` is a `warn` and the other seven still load;
+  `App::notify` is the only `error` path, so every error line has a matching
+  notification on screen and vice versa
+- **Nothing logs per frame.** Every call site is a load, a parse, an analyser
+  run, or a click — `ui`/`tabs` stay silent, because a line per frame at 120 Hz
+  is not a log, it is a leak
+- The update check is the one exception to all of this: every failure there is
+  `debug` and nothing reaches the UI (see above)
+
 ### Update check
 
 One unauthenticated `GET api.github.com/repos/PedroS235/blackbird/releases/latest`
@@ -503,6 +534,8 @@ _(none yet — project is in initial setup)_
 | Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
 | Overlays default to off, behind an inline toggle row | The panel opens as a clean spectrum, so every mark over the curve is one the pilot asked for. The toggles are laid out inline rather than in a dropdown: a button that opens a menu announces nothing, and with every family off there is no mark on the plot to hint that more exists. One wrapped row is the whole cost |
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
+| One `tracing` subscriber, `RUST_LOG`-overridable, crate-only by default | A bug report is a paste of this output. Dependencies logging per frame bury the parse and analysis lines it exists to show, and a pilot can still widen it without a rebuild |
+| A missing log field warns at parse time, not where it is used | `gyroUnfilt` off means every spectral panel is empty for a reason no panel can name. Said once, at load, in the one place that knows what was in the file |
 | Update check offers a download, never self-replaces | Assets are unsigned bare binaries and the install source is unknowable — a self-updater would fight Gatekeeper, a running `.exe`, and package managers, with nothing to verify the download against |
 | `ureq` + rustls for the update check, not `reqwest` | One blocking GET does not justify pulling in a tokio runtime, and rustls keeps the single binary free of a libssl dynamic link |
 | Changelog generated at release time, not tracked | It is derived from the commits. A generated file in the tree drifts from the tag it describes, and regenerating it by hand was a step that got skipped — the 0.7.0 release shipped with its section still headed `[unreleased]` |

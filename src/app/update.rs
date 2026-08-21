@@ -111,11 +111,19 @@ impl BlackbirdApp {
 
         match rx.try_recv() {
             Ok(found) => {
+                if found.is_none() {
+                    tracing::debug!("no newer release than this build");
+                }
                 self.update.found = found;
                 self.update.rx = None;
             }
             Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => self.update.rx = None,
+            // The thread died without answering. Nothing to offer and nothing
+            // to retry — the check is once per launch by design.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::debug!("the update check thread ended without an answer");
+                self.update.rx = None;
+            }
         }
     }
 }

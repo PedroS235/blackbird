@@ -100,6 +100,11 @@ impl LogStore {
     pub(super) fn push(&mut self, loaded: loader::LoadedLog) {
         let id = LogId(self.next_id);
         self.next_id += 1;
+        tracing::debug!(
+            "stored {} as {id:?} with {} sublog(s)",
+            loaded.file_name,
+            loaded.logs.len()
+        );
 
         self.logs.push(LoadedLog {
             id,
@@ -109,12 +114,14 @@ impl LogStore {
         });
         if self.selected.is_none() {
             self.selected = Some(self.logs.len() - 1);
+            tracing::debug!("{id:?} selected — the first log loaded");
         }
     }
 
     pub(super) fn select(&mut self, index: usize) {
         debug_assert!(index < self.logs.len());
         self.selected = Some(index);
+        tracing::debug!("selected {}", self.name_of(index));
     }
 
     pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut LoadedLog, bool)> {
@@ -131,6 +138,7 @@ impl LogStore {
     /// was selected.
     pub(super) fn remove(&mut self, index: usize) {
         debug_assert!(index < self.logs.len());
+        tracing::info!("closed {}", self.name_of(index));
         self.logs.remove(index);
         self.selected = match self.selected {
             Some(sel) if sel == index => {
@@ -139,6 +147,17 @@ impl LogStore {
             Some(sel) if sel > index => Some(sel - 1),
             sel => sel,
         };
+    }
+
+    /// What to call a log in a diagnostic. Never fails: an out-of-range index
+    /// is a bug the caller's `debug_assert` catches, and a log line is not
+    /// where that should surface.
+    fn name_of(&self, index: usize) -> String {
+        self.logs
+            .get(index)
+            .and_then(|loaded| loaded.log.first())
+            .map(|parsed| parsed.metadata.file_name.clone())
+            .unwrap_or_else(|| format!("log #{index}"))
     }
 
     fn find(&self, id: LogId) -> Option<&LoadedLog> {

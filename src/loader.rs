@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Instant;
 
 use crate::analysis::{Analysis, GyroNoiseAnalyzer, StepResponseAnalyzer};
 use crate::parser::{LogFile, ParseError, ParsedLog};
@@ -89,20 +90,32 @@ pub struct LogLoader {
 impl LogLoader {
     /// Every analyser this pipeline runs over one parsed sublog.
     fn analyse(&self, parsed: &ParsedLog) -> Analysis {
-        Analysis {
+        let started = Instant::now();
+        let analysis = Analysis {
             spectral: self.analyzer.analyze(&parsed.flight_data, &parsed.metadata),
             step: self.step_response.analyze(&parsed.flight_data),
-        }
+        };
+        tracing::debug!(
+            "{}: log {} analysed in {:.0} ms",
+            parsed.metadata.file_name,
+            parsed.log_index + 1,
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        analysis
     }
 
     /// Open and load one file on the calling thread.
     pub fn load_path(&self, path: &Path, cancel: &CancelToken, sink: &mut impl LoadSink) {
+        tracing::info!("loading {}", path.display());
         match LogFile::open(path) {
             Ok(file) => self.load_file(&file, cancel, sink),
-            Err(error) => sink.emit(LoadEvent::Failed {
-                file_name: file_name_of(path),
-                error: error.to_string(),
-            }),
+            Err(error) => {
+                tracing::warn!("{}: {error}", path.display());
+                sink.emit(LoadEvent::Failed {
+                    file_name: file_name_of(path),
+                    error: error.to_string(),
+                });
+            }
         }
     }
 
@@ -110,8 +123,10 @@ impl LogLoader {
     /// A corrupt sublog is reported and skipped — one bad flight in a `.bbl`
     /// no longer costs the other seven.
     pub fn load_file(&self, file: &LogFile, cancel: &CancelToken, sink: &mut impl LoadSink) {
+        let started = Instant::now();
         let sublog_count = file.log_count();
         let name = &file.file_name;
+        tracing::debug!("{name}: {sublog_count} sublog(s) to parse");
         let mut loaded = LoadedLog {
             file_name: name.clone(),
             ..Default::default()
@@ -129,6 +144,7 @@ impl LogLoader {
             };
 
             if !progress(0.0) {
+                tracing::info!("{name}: cancelled before log {}", sublog + 1);
                 sink.emit(LoadEvent::Cancelled {
                     file_name: name.clone(),
                 });
@@ -141,21 +157,35 @@ impl LogLoader {
                     loaded.logs.push(parsed);
                 }
                 Err(ParseError::Cancelled) => {
+                    tracing::info!("{name}: cancelled during log {}", sublog + 1);
                     sink.emit(LoadEvent::Cancelled {
                         file_name: name.clone(),
                     });
                     return;
                 }
-                Err(error) => sink.emit(LoadEvent::Failed {
-                    file_name: name.clone(),
-                    error: format!("log {}: {error}", sublog + 1),
-                }),
+                Err(error) => {
+                    // One bad sublog is not a bad file: the rest still loads,
+                    // so this is a warning and the loop carries on.
+                    tracing::warn!("{name}: log {} failed: {error}", sublog + 1);
+                    sink.emit(LoadEvent::Failed {
+                        file_name: name.clone(),
+                        error: format!("log {}: {error}", sublog + 1),
+                    });
+                }
             }
         }
 
-        if !loaded.logs.is_empty() {
-            sink.emit(LoadEvent::Ready(loaded));
+        if loaded.logs.is_empty() {
+            tracing::warn!("{name}: nothing loaded — no sublog parsed");
+            return;
         }
+
+        tracing::info!(
+            "{name}: {}/{sublog_count} sublog(s) loaded in {:.2} s",
+            loaded.logs.len(),
+            started.elapsed().as_secs_f64()
+        );
+        sink.emit(LoadEvent::Ready(loaded));
     }
 
     /// One thread per path. Events arrive interleaved, in whatever order the
@@ -164,6 +194,7 @@ impl LogLoader {
         let (tx, rx) = mpsc::channel();
         let cancel = CancelToken::default();
         let expected = paths.len();
+        tracing::debug!("spawning {expected} loader thread(s)");
 
         for path in paths {
             let (mut tx, cancel, loader) = (tx.clone(), cancel.clone(), self.clone());
