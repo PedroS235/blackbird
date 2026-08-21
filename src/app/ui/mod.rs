@@ -1,4 +1,5 @@
 pub mod compare;
+pub mod harmonic_key;
 pub mod heatmap;
 pub mod hover;
 pub mod log_card;

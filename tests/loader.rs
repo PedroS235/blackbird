@@ -4,11 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use blackbird::analysis::{
-    FilterLoop, FilterOverlay, HarmonicBand, NoStepResponse, OverlayFamily, OverlayShape,
+    DEFAULT_TRIM_S, FilterLoop, FilterOverlay, HarmonicBand, NoStepResponse, OverlayFamily,
+    OverlayShape,
 };
 use blackbird::loader::{CancelToken, LoadEvent, LoadedLog, LogLoader};
 use blackbird::parser::metadata::RateType;
-use blackbird::parser::{Axis, LogFile};
+use blackbird::parser::{Axis, Channel, LogFile};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -113,6 +114,52 @@ fn a_fixtures_motors_become_harmonic_bands_at_their_own_frequencies() {
 
     // The third harmonic is three times the first, per motor.
     assert!((motor_zero[2].low_hz - 3.0 * fundamental.low_hz).abs() < 1e-6);
+}
+
+/// The behavioural change the narrower bands exist for: a band is where a
+/// motor *spent* the window, not the two frequencies it touched. Anything as
+/// wide as the full excursion means the percentile was never taken, and three
+/// orders of that wash over most of the spectrum.
+#[test]
+fn a_harmonic_band_is_narrower_than_the_motors_full_excursion() {
+    let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let OverlayShape::Harmonics(bands) = &loaded.analysis[0]
+        .spectral
+        .overlays
+        .iter()
+        .find(|o| o.family == OverlayFamily::Harmonics)
+        .expect("the fixture logs eRPM")
+        .shape
+    else {
+        panic!("harmonics are a harmonic group");
+    };
+
+    // The same window the analysis measured, so the comparison is against the
+    // extent of exactly the samples the band was drawn from.
+    let trimmed = loaded.logs[0].flight_data.trimmed(DEFAULT_TRIM_S);
+    let metadata = &loaded.logs[0].metadata;
+
+    for band in bands.iter().filter(|b| b.order == 1) {
+        let running: Vec<f64> = trimmed
+            .channel(Channel::Rpm(band.motor))
+            .expect("the motor is logged")
+            .iter()
+            .copied()
+            .filter(|&v| v > 0.0)
+            .collect();
+        let extent = |f: fn(f64, f64) -> f64| {
+            metadata.erpm_to_hz(running.iter().copied().fold(running[0], f))
+        };
+        let (low, high) = (extent(f64::min), extent(f64::max));
+
+        assert!(
+            band.low_hz > low && band.high_hz < high,
+            "motor {} drew {:.0}..{:.0} Hz over an excursion of {low:.0}..{high:.0} Hz",
+            band.motor,
+            band.low_hz,
+            band.high_hz
+        );
+    }
 }
 
 /// A harmonic whose RPM filter weight is zero is tracked and not attenuated,

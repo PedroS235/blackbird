@@ -11,7 +11,7 @@ use crate::signal::fft::BinnedSpectrum;
 pub(super) struct HeatmapRow<'a> {
     pub(super) axis: Axis,
     pub(super) spectrum: &'a BinnedSpectrum,
-    pub(super) overlay: Option<OverlaySeries<'a>>,
+    pub(super) overlays: Vec<OverlaySeries<'a>>,
 }
 
 /// Which heatmap this is. The two differ only in orientation, wording and plot
@@ -102,7 +102,7 @@ impl HeatmapPanel {
                 spectrum: row.spectrum,
                 height,
                 floor_db: self.floor_db as f64,
-                overlay: row.overlay,
+                overlays: row.overlays,
             }
             .show(ui);
         }

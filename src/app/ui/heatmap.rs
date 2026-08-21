@@ -1,15 +1,30 @@
 use egui::{Color32, ColorImage, TextureOptions, Vec2, Vec2b};
-use egui_plot::{Line, Plot, PlotImage, PlotPoint, PlotPoints};
+use egui_plot::{Line, LineStyle, Plot, PlotImage, PlotPoint, PlotPoints};
 
 use crate::signal::fft::BinnedSpectrum;
 use crate::signal::timeseries::windowed_downsample;
 
-/// A tracked-frequency line to overlay on the heatmap, in plot space (time on
+/// A frequency-over-time line to overlay on the heatmap, in plot space (time on
 /// x, Hz on y). Only meaningful for [`HeatmapOrientation::VsTime`].
+///
+/// A list rather than one: the dynamic notch tracker's centre used to be the
+/// only thing drawn here and was a special case, and per-motor harmonic curves
+/// are a dozen more of the same kind of thing. Each carries its own colour and
+/// style, so the panel that built it owns the identity scheme.
+#[derive(Clone)]
 pub struct OverlaySeries<'a> {
+    pub name: String,
     pub t0: u64,
     pub time_us: &'a [u64],
+    /// Borrowed raw, in whatever unit the log holds — `scale` converts.
     pub samples: &'a [f64],
+    /// Applied after decimation. Min-max decimation commutes with a positive
+    /// scale, so a motor's eRPM is borrowed as logged and converted once per
+    /// *drawn* point, rather than a converted copy of every sample being built
+    /// per frame for every motor at every order.
+    pub scale: f64,
+    pub color: Color32,
+    pub style: LineStyle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +53,7 @@ pub struct Heatmap<'a> {
     pub spectrum: &'a BinnedSpectrum,
     pub height: f32,
     pub floor_db: f64,
-    pub overlay: Option<OverlaySeries<'a>>,
+    pub overlays: Vec<OverlaySeries<'a>>,
 }
 
 impl Heatmap<'_> {
@@ -105,7 +120,7 @@ impl Heatmap<'_> {
 
         let (x_label, y_label) = self.orientation.axis_labels();
         let bucket_count = (ui.available_width().max(1.0) as usize).max(1);
-        let overlay = &self.overlay;
+        let overlays = &self.overlays;
 
         Plot::new(self.id.as_str())
             .height(self.height)
@@ -117,23 +132,56 @@ impl Heatmap<'_> {
             .show(ui, |plot_ui| {
                 plot_ui.image(PlotImage::new(self.id.as_str(), &texture, center, size));
 
-                if let Some(overlay) = overlay {
+                for overlay in overlays {
                     let bounds = plot_ui.plot_bounds();
-                    let points = windowed_downsample(
+                    let points: Vec<[f64; 2]> = windowed_downsample(
                         overlay.time_us,
                         overlay.samples,
                         overlay.t0,
                         bounds.min()[0],
                         bounds.max()[0],
                         bucket_count,
-                    );
-                    plot_ui.line(
-                        Line::new("tracked center freq", PlotPoints::from(points))
-                            .color(Color32::WHITE),
-                    );
+                    )
+                    .into_iter()
+                    .map(|[t, v]| [t, v * overlay.scale])
+                    .collect();
+
+                    // One line per run that stays inside the map, so a curve
+                    // that leaves it breaks instead of being joined across the
+                    // gap by a chord at frequencies the motor never occupied.
+                    // Only the first run is named: twelve curves already, and
+                    // a hover listing the same motor five times says less.
+                    for (i, run) in drawable_runs(&points, freq_min, freq_max)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let name = match i {
+                            0 => overlay.name.clone(),
+                            _ => String::new(),
+                        };
+                        plot_ui.line(
+                            Line::new(name, PlotPoints::from(run.to_vec()))
+                                .color(overlay.color)
+                                .style(overlay.style),
+                        );
+                    }
                 }
             });
     }
+}
+
+/// The runs of consecutive points the map can actually show, split where the
+/// curve leaves it.
+///
+/// The image sets the plot's bounds, so a third harmonic above Nyquist would
+/// stretch them until the heatmap is a stripe. Zero is dropped with the rest —
+/// a stopped motor and a tracker with nothing to report are both logged as 0,
+/// and neither is a frequency the craft flew.
+fn drawable_runs(points: &[[f64; 2]], freq_min: f64, freq_max: f64) -> Vec<&[[f64; 2]]> {
+    points
+        .split(|&[_, v]| !(v > 0.0 && (freq_min..=freq_max).contains(&v)))
+        .filter(|run| !run.is_empty())
+        .collect()
 }
 
 fn heat_color(t: f32) -> Color32 {
@@ -146,4 +194,47 @@ fn heat_color(t: f32) -> Color32 {
         (s, 1.0 - s, 0.0)
     };
     Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// A curve that leaves the map breaks in two rather than being joined
+    /// across the gap: a chord drawn over the clipped span sits at frequencies
+    /// the motor never occupied, which is a lie the pilot cannot see is one.
+    #[test]
+    fn a_curve_that_leaves_the_map_breaks_instead_of_being_joined() {
+        let points = [
+            [0.0, 100.0],
+            [1.0, 200.0],
+            [2.0, 900.0],
+            [3.0, 250.0],
+            [4.0, 300.0],
+        ];
+
+        let runs = drawable_runs(&points, 1.0, 500.0);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0], &points[0..2]);
+        assert_eq!(runs[1], &points[3..5]);
+    }
+
+    /// A stopped motor is logged as zero eRPM, which is not a frequency at
+    /// all — and nothing is drawn for it, at either end of the flight.
+    #[test]
+    fn a_stopped_motor_draws_nothing_rather_than_a_line_at_zero() {
+        let points = [[0.0, 0.0], [1.0, 300.0], [2.0, 0.0]];
+
+        let runs = drawable_runs(&points, 1.0, 500.0);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0], &points[1..2]);
+    }
+
+    /// A curve wholly inside the map is one unbroken line.
+    #[test]
+    fn a_curve_inside_the_map_stays_one_line() {
+        let points = [[0.0, 100.0], [1.0, 200.0], [2.0, 300.0]];
+
+        assert_eq!(drawable_runs(&points, 1.0, 500.0), vec![&points[..]]);
+    }
 }

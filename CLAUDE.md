@@ -88,6 +88,7 @@ src/
     ├── update.rs            ← the check thread, and the strip that offers it
     ├── ui/                  ← widgets shared across tabs
     │   ├── compare.rs       ← compare chips and picker
+    │   ├── harmonic_key.rs  ← hue per motor, style per order, and its legend
     │   ├── heatmap.rs       ← heatmap rendering
     │   ├── overlay_menu.rs  ← which overlay families a panel is drawing
     │   └── timeseries_plot.rs
@@ -254,9 +255,32 @@ load, and storing it puts the feature behind the loader integration seam.
 - `OverlayShape::Line` — only a notch whose cutoff cannot give a Q, so its
   shape cannot be derived. Everything sizeable draws its response
 - `OverlayShape::Harmonics` — one band per motor per order, from `eRPM`, over
-  the frequencies that motor actually reached. Order count comes from
-  `RpmFilterConfig::harmonics`; a zero-weight order is flagged unfiltered.
-  Stopped-motor samples are excluded, so no band runs down to 0 Hz
+  the frequencies that motor *spent the window at*: the 5th to 95th percentile
+  of its running eRPM, not its two extremes. The full excursion of a freestyle
+  log runs from idle to full song, and three orders of that wash over most of
+  the spectrum — a band covering everything can never say a peak is *not* motor
+  noise. Samples are uniform in time, so a rank over them is already
+  time-weighted. Order count comes from `RpmFilterConfig::harmonics`, clamped
+  to Betaflight's own maximum of three; a zero-weight order is flagged
+  unfiltered. Stopped-motor samples are excluded, so no band runs down to 0 Hz
+- **Hue is the motor, line style is the harmonic order** — solid, dashed,
+  dotted for the fundamental and its two multiples, one scheme in
+  `ui::harmonic_key` that the PSD's spans and the Spectrogram's curves both
+  read. Order is derivable from the frequency axis and spends a colour on a
+  fact the pilot can already see; which of four motors is loud is the actual
+  diagnosis — a bent shaft, a chipped prop, a dying bearing — and nothing else
+  on the plot says it. Four hues, cycled so a hex still draws. A tracked but
+  zero-weight order keeps its identity and is dimmed
+- The PSD draws the bands as **unfilled** spans with no in-plot labels, keyed
+  by a legend row that appears above the plots only while the family is on.
+  Twelve fills leave nothing of the curve, and a peak has to be visibly
+  *outside* a band for the overlay to say anything
+- The Spectrogram draws the same identities as **curves of frequency against
+  time** — the PIDToolbox view. Built per frame from `eRPM` rather than stored:
+  the panel already holds the flight data, and the series borrows the samples
+  as logged with a `scale` applied after decimation, which min-max decimation
+  commutes with. Clipped to the heatmap's own frequency range, so a third
+  harmonic above Nyquist cannot stretch the plot's bounds
 - Responses are modelled at **`Metadata::filter_rate_hz`, the PID loop rate**,
   not the logging rate — a log written every second frame would otherwise show
   every stage rolling off far earlier than it does. They are the discrete
@@ -271,6 +295,12 @@ load, and storing it puts the feature behind the loader integration seam.
   there too, and default off with the rest — they are not a filter and so not
   an `OverlayFamily`, but to a pilot they are one more thing drawn over the
   curve
+- The menu is passed **the families the panel can draw**, not all of them: the
+  Spectrogram lists Harmonics and Dyn notch and nothing else, and takes no
+  peaks switch, because a greyed toggle there would blame the log for a shape
+  the panel was never going to draw. Which makes the dynamic notch trace —
+  drawn unconditionally before — opt-in like everything else, the accepted cost
+  of one rule for every overlay on the panel
 
 ### Step response
 
@@ -536,7 +566,11 @@ _(none yet — project is in initial setup)_
 | Panels reach other flights through a read-only catalog on `TabCtx` | A panel handed `&LogStore` could `select` or `remove` mid-frame while the sidepanel iterates it |
 | Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
 | Overlays default to off, behind an inline toggle row | The panel opens as a clean spectrum, so every mark over the curve is one the pilot asked for. The toggles are laid out inline rather than in a dropdown: a button that opens a menu announces nothing, and with every family off there is no mark on the plot to hint that more exists. One wrapped row is the whole cost |
+| Harmonic identity is hue-per-motor plus style-per-order | Order is derivable — the second harmonic is at twice the first and the pilot can see that. Which motor is loud is not derivable and is the diagnosis. Colouring by order spent the only distinguishing channel on the less useful of the two facts, and left four motors indistinguishable |
+| Harmonic bands are a percentile, not an extent | On any real freestyle log the full min..max runs idle to full song, so three orders of it overlap into a wash that covers most of the spectrum. Every peak lands inside one, so every peak looks motor-explained and the overlay says nothing |
+| Spectrogram harmonics are built per frame, not stored | The panel already holds the flight data, and the dynamic notch trace set the precedent. The series borrows eRPM as logged and carries a `scale` applied after decimation — min-max decimation commutes with a positive scale, so nothing is copied per frame |
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
+| The harmonic mark's *hue and style together* live in `ui/harmonic_key.rs`, not `colors.rs` | `colors.rs` stays the palette — which hue is motor 3, in this theme. But a harmonic mark's identity is a hue *and* a line style, and a line style is not a colour: splitting the pair across two modules is exactly how the PSD's spans and the spectrogram's curves would come to disagree. `harmonic_key` asks `colors` for the hue and owns nothing else about the palette |
 | One `tracing` subscriber, `RUST_LOG`-overridable, crate-only by default | A bug report is a paste of this output. Dependencies logging per frame bury the parse and analysis lines it exists to show, and a pilot can still widen it without a rebuild |
 | A missing log field warns at parse time, not where it is used | `gyroUnfilt` off means every spectral panel is empty for a reason no panel can name. Said once, at load, in the one place that knows what was in the file |
 | Update check offers a download, never self-replaces | Assets are unsigned bare binaries and the install source is unknowable — a self-updater would fight Gatekeeper, a running `.exe`, and package managers, with nothing to verify the download against |

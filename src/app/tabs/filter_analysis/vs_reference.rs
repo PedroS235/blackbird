@@ -12,7 +12,7 @@ pub(super) fn rows(analysis: &SpectralAnalysis) -> Vec<HeatmapRow<'_>> {
             Some(HeatmapRow {
                 axis,
                 spectrum,
-                overlay: None,
+                overlays: Vec::new(),
             })
         })
         .collect()

@@ -50,13 +50,17 @@ impl OverlayFamily {
     ];
 }
 
-/// One motor's noise at one harmonic order, over the frequencies it actually
-/// reached across the analysed window.
+/// One motor's noise at one harmonic order, over the frequencies it spent the
+/// analysed window at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarmonicBand {
     pub motor: usize,
     /// 1 is the fundamental.
     pub order: u32,
+    /// The 5th and 95th percentile of this motor's running eRPM, times the
+    /// order — not its two extremes. A band drawn from idle to full song
+    /// covers most of the spectrum, and a band that covers everything cannot
+    /// say that a peak came from somewhere else.
     pub low_hz: f64,
     pub high_hz: f64,
     /// False where this order's RPM filter weight is zero — the filter tracks
@@ -118,6 +122,17 @@ pub struct FilterOverlay {
 /// smooth trough, few enough to keep the averaging cheap.
 const TRACE_BINS: usize = 64;
 
+/// Betaflight's own ceiling for RPM filter harmonics. The header is read raw,
+/// so a log claiming more is clamped rather than inventing a fourth identity
+/// for an order the firmware cannot filter.
+const MAX_HARMONIC_ORDERS: u32 = 3;
+
+/// Where a motor spent the flight, rather than the two extremes it touched.
+/// The full min..max of a freestyle log runs from idle to full song, and three
+/// orders of that wash over most of the spectrum — a band covering everything
+/// can never tell a pilot that a peak is *not* motor noise.
+const BAND_PERCENTILES: (f64, f64) = (0.05, 0.95);
+
 /// Throttle is logged on the stick scale, and the dynamic cutoff curve wants
 /// a fraction.
 const THROTTLE_MIN: f64 = 1000.0;
@@ -140,16 +155,22 @@ pub(super) fn build(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay>
 }
 
 /// A band per motor per harmonic order. The order count is the RPM filter's,
-/// so the plot matches the Betaflight setting rather than a constant; without
-/// an RPM filter only the fundamental is drawn, and nothing claims it is
-/// attenuated.
+/// so the plot matches the Betaflight setting rather than a constant — clamped
+/// to what the firmware can actually filter; without an RPM filter only the
+/// fundamental is drawn, and nothing claims it is attenuated.
 fn harmonics(fd: &Trimmed<'_>, metadata: &Metadata) -> Option<FilterOverlay> {
     let rpm_filter = metadata.filters.rpm_filter.as_ref();
-    let orders = rpm_filter.map_or(1, |r| r.harmonics).max(1);
+    let configured = rpm_filter.map_or(1, |r| r.harmonics).max(1);
+    let orders = configured.min(MAX_HARMONIC_ORDERS);
+    if orders < configured {
+        tracing::debug!(
+            "rpm_filter_harmonics reads {configured}; drawing {orders}, Betaflight's own maximum"
+        );
+    }
 
     let bands: Vec<HarmonicBand> = (0..fd.rpm_count())
         .filter_map(|motor| {
-            let (low, high) = spinning_extent(fd.channel(Channel::Rpm(motor))?)?;
+            let (low, high) = spinning_span(fd.channel(Channel::Rpm(motor))?)?;
             let (low, high) = (metadata.erpm_to_hz(low), metadata.erpm_to_hz(high));
 
             Some((1..=orders).map(move |order| HarmonicBand {
@@ -170,16 +191,23 @@ fn harmonics(fd: &Trimmed<'_>, metadata: &Metadata) -> Option<FilterOverlay> {
     })
 }
 
-/// Samples where the motor is stopped are left out: a band running down to
-/// zero describes a prop that was not turning, not a frequency the craft flew.
-fn spinning_extent(samples: &[f64]) -> Option<(f64, f64)> {
-    samples
-        .iter()
-        .filter(|&&v| v > 0.0)
-        .fold(None, |acc: Option<(f64, f64)>, &v| match acc {
-            Some((lo, hi)) => Some((lo.min(v), hi.max(v))),
-            None => Some((v, v)),
-        })
+/// Where a motor actually spent the window, as a percentile of its *running*
+/// eRPM. Stopped samples are dropped first: a band running down to zero
+/// describes a prop that was not turning, not a frequency the craft flew.
+///
+/// Samples are uniform in time, so a rank over them is already time-weighted —
+/// a brief blip to full throttle moves the 95th percentile by as little as it
+/// occupied the flight, which is the whole point of not taking the maximum.
+fn spinning_span(samples: &[f64]) -> Option<(f64, f64)> {
+    let mut running: Vec<f64> = samples.iter().copied().filter(|&v| v > 0.0).collect();
+    if running.is_empty() {
+        return None;
+    }
+    running.sort_by(f64::total_cmp);
+
+    let at = |q: f64| running[((running.len() - 1) as f64 * q).round() as usize];
+    let (low, high) = BAND_PERCENTILES;
+    Some((at(low), at(high)))
 }
 
 /// A weight of zero means the RPM filter tracks this harmonic and attenuates
@@ -613,10 +641,59 @@ mod test {
     #[test]
     fn a_stopped_motor_does_not_stretch_a_band_to_zero() {
         assert_eq!(
-            spinning_extent(&[0.0, 2000.0, 3000.0]),
+            spinning_span(&[0.0, 2000.0, 3000.0]),
             Some((2000.0, 3000.0))
         );
-        assert_eq!(spinning_extent(&[0.0, 0.0]), None);
+        assert_eq!(spinning_span(&[0.0, 0.0]), None);
+    }
+
+    /// The change the narrower band exists for: a motor held at one frequency
+    /// for almost the whole window, with a brief blip either side, must draw
+    /// the frequency it held — not the two frequencies it touched once.
+    #[test]
+    fn a_brief_excursion_does_not_widen_the_band() {
+        let mut samples = vec![4000.0; 100];
+        samples[0] = 500.0;
+        samples[99] = 20000.0;
+
+        let (low, high) = spinning_span(&samples).expect("the motor was running");
+        assert_eq!((low, high), (4000.0, 4000.0));
+    }
+
+    /// A motor worked across its range keeps a band, and it is inside the
+    /// extremes rather than equal to them.
+    #[test]
+    fn a_worked_motor_keeps_a_band_inside_its_extremes() {
+        let samples: Vec<f64> = (1..=100).map(|i| i as f64 * 100.0).collect();
+
+        let (low, high) = spinning_span(&samples).expect("the motor was running");
+        assert!(low > 100.0 && high < 10000.0, "{low}..{high}");
+        assert!(high > low);
+    }
+
+    /// Betaflight filters three harmonics at most. A header claiming five is a
+    /// header, not a capability, and a fourth identity for an order nothing
+    /// can filter is a claim the plot must not make.
+    #[test]
+    fn more_harmonics_than_betaflight_can_filter_are_clamped_to_three() {
+        let fd = FlightData::default()
+            .with_time(vec![0, 1000, 2000])
+            .with_channel(Channel::Rpm(0), vec![4000.0, 4000.0, 4000.0]);
+        let metadata = Metadata {
+            filters: FilterConfig {
+                rpm_filter: Some(rpm_filter(vec![1.0; 5])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let OverlayShape::Harmonics(bands) = harmonics(&fd.trimmed(0.0), &metadata).unwrap().shape
+        else {
+            panic!("harmonics are a harmonic group");
+        };
+
+        assert_eq!(bands.len(), 3, "{bands:?}");
+        assert_eq!(bands.iter().map(|b| b.order).max(), Some(3));
     }
 
     /// Without eRPM there is nothing to draw, which is what greys the menu

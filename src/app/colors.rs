@@ -15,17 +15,29 @@ pub(in crate::app) const COMPARE_SLOTS: usize = 7;
 /// survives a theme toggle mid-session. Only luminance comes from the palette.
 const SLOT_HUES: [f32; COMPARE_SLOTS] = [0.0, 0.08, 0.20, 0.30, 0.47, 0.65, 0.81];
 
-/// Fixed hues for the harmonic orders — amber, violet, spring green — in the
-/// same spirit as the compare slots: "the amber band is the fundamental"
-/// survives a theme toggle, and none of the three is one of Betaflight's
-/// roll/pitch/yaw accents.
-const HARMONIC_HUES: [f32; 3] = [0.11, 0.79, 0.35];
+/// Fixed hues for the motors — amber, spring green, cyan, violet — in the same
+/// spirit as the compare slots: "the amber trace is motor 1" survives a theme
+/// toggle, and none of the four is one of Betaflight's roll/pitch/yaw accents.
+///
+/// Hue is the *motor*, not the harmonic order, which the line style carries.
+/// Which order a peak is sits at a multiple of the fundamental and a pilot can
+/// read it off the frequency axis; which motor is louder than its three
+/// siblings is a bent shaft or a dying bearing, and nothing else on the plot
+/// says it.
+const MOTOR_HUES: [f32; 4] = [0.11, 0.35, 0.55, 0.79];
 
 /// Gold for a detected peak, periwinkle for a configured filter. Both were
 /// fixed RGB constants in the panels until now, which meant light mode drew
 /// the dark theme's marks.
 const PEAK_HUE: f32 = 0.14;
 const FILTER_HUE: f32 = 0.63;
+
+/// A motor's mark is a thin outline or a curve among twelve, so it takes full
+/// saturation — and on a light background a lower value, because a hue at full
+/// value on paper is a highlighter rather than a line. Both clear the contrast
+/// floor the mark tests hold every drawn colour to.
+const MOTOR_SATURATION: f32 = 1.0;
+const MOTOR_VALUE_LIGHT: f32 = 0.65;
 
 /// Saturation of the base flight's colour against the flights it is compared
 /// against. Saturation rather than luminance is what steps the secondaries
@@ -74,29 +86,42 @@ pub(in crate::app) fn filter_color(palette: &Palette) -> Color32 {
     hue_color(palette, FILTER_HUE, BASE_SATURATION)
 }
 
-/// A harmonic order's colour, 1 being the fundamental. Order, not motor: four
-/// motors at one order are the same noise, and what a pilot needs to tell
-/// apart is a fundamental from its multiples.
-pub(in crate::app) fn harmonic_color(palette: &Palette, order: u32) -> Color32 {
-    let index = order.max(1) as usize - 1;
-    // Saturation from the palette too: a band is a fill as well as an outline,
-    // and a light background needs more of it to read at all.
-    let saturation = if palette.is_dark { 0.80 } else { 0.95 };
-
-    hue_color(
+/// One motor's colour, 0-based. Four hues, cycled past the fourth: a hex or an
+/// octo still draws, at the cost of two motors sharing a hue — four distinct
+/// hues that all clear the contrast floor is already most of the wheel, and
+/// eight would crowd into neighbours a pilot cannot tell apart anyway.
+pub(in crate::app) fn motor_color(palette: &Palette, motor: usize) -> Color32 {
+    shade(
         palette,
-        HARMONIC_HUES[index % HARMONIC_HUES.len()],
-        saturation,
+        MOTOR_HUES[motor % MOTOR_HUES.len()],
+        MOTOR_SATURATION,
+        MOTOR_VALUE_LIGHT,
     )
 }
+
+/// The same mark, for something the filter tracks and takes nothing off. Hue
+/// and style still say which motor at which order — dimming says the noise is
+/// there and nothing is being removed from it.
+pub(in crate::app) fn dimmed(color: Color32) -> Color32 {
+    color.gamma_multiply(0.45)
+}
+
+/// How dark a mark goes on a light background by default. A single trace can
+/// afford to stay bright; anything drawn in bulk passes its own value to
+/// [`shade`].
+const LIGHT_VALUE: f32 = 0.90;
 
 /// Hue is the identity and survives a theme switch; only luminance comes from
 /// the palette, so a mark keeps its contrast in both.
 fn hue_color(palette: &Palette, hue: f32, saturation: f32) -> Color32 {
+    shade(palette, hue, saturation, LIGHT_VALUE)
+}
+
+fn shade(palette: &Palette, hue: f32, saturation: f32, light_value: f32) -> Color32 {
     HsvaGamma {
         h: hue,
         s: saturation,
-        v: if palette.is_dark { 1.0 } else { 0.90 },
+        v: if palette.is_dark { 1.0 } else { light_value },
         a: 1.0,
     }
     .into()
@@ -156,9 +181,8 @@ mod test {
                 .map(|slot| (format!("slot {slot}"), slot_color(&palette, slot)))
                 .chain(Axis::ALL.map(|axis| (axis.name().to_string(), axis_color(&palette, axis))))
                 .chain(
-                    (1..=HARMONIC_HUES.len() as u32).map(|order| {
-                        (format!("harmonic {order}"), harmonic_color(&palette, order))
-                    }),
+                    (0..MOTOR_HUES.len())
+                        .map(|motor| (format!("motor {motor}"), motor_color(&palette, motor))),
                 )
                 .chain([
                     ("peak".to_string(), peak_color(&palette)),
@@ -192,25 +216,25 @@ mod test {
         }
     }
 
-    /// A fundamental and its multiples have to be tellable apart at a glance,
-    /// and none of them may be mistaken for an axis trace.
+    /// The diagnosis the overlay exists for is one motor behaving unlike its
+    /// three siblings, so no two of a quad's motors may share a drawn identity
+    /// — and none of them may be mistaken for an axis trace.
     #[test]
-    fn harmonic_orders_are_distinct_from_each_other_and_from_the_axes() {
+    fn every_motor_of_a_quad_is_a_different_colour_from_the_others_and_the_axes() {
         for palette in palettes() {
-            let orders: Vec<Color32> = (1..=HARMONIC_HUES.len() as u32)
-                .map(|order| harmonic_color(&palette, order))
+            let motors: Vec<Color32> = (0..MOTOR_HUES.len())
+                .map(|motor| motor_color(&palette, motor))
                 .collect();
 
-            for (i, &color) in orders.iter().enumerate() {
-                for &other in &orders[i + 1..] {
-                    assert_ne!(color, other, "two harmonic orders share a colour");
+            for (i, &color) in motors.iter().enumerate() {
+                for &other in &motors[i + 1..] {
+                    assert_ne!(color, other, "two motors share a colour");
                 }
                 for axis in Axis::ALL {
                     assert_ne!(
                         color,
                         axis_color(&palette, axis),
-                        "harmonic {} is the {} trace's colour",
-                        i + 1,
+                        "motor {i} is the {} trace's colour",
                         axis.name()
                     );
                 }
@@ -218,17 +242,28 @@ mod test {
         }
     }
 
-    /// The order sequence wraps rather than panicking on a craft configured
-    /// with more harmonics than there are hues.
+    /// A hex still draws: the sequence wraps rather than panicking, at the
+    /// cost of motor 5 wearing motor 1's hue.
     #[test]
-    fn an_order_past_the_hue_sequence_wraps() {
+    fn a_motor_past_the_hue_sequence_wraps() {
         let palette = Palette::charcoal();
-        let orders = HARMONIC_HUES.len() as u32;
 
         assert_eq!(
-            harmonic_color(&palette, orders + 1),
-            harmonic_color(&palette, 1)
+            motor_color(&palette, MOTOR_HUES.len()),
+            motor_color(&palette, 0)
         );
+    }
+
+    /// Dimming may not turn one motor's mark into another's, and it has to be
+    /// visibly a step down from the mark it dims.
+    #[test]
+    fn a_dimmed_mark_is_the_same_identity_a_step_darker() {
+        for palette in palettes() {
+            for motor in 0..MOTOR_HUES.len() {
+                let color = motor_color(&palette, motor);
+                assert_ne!(dimmed(color), color);
+            }
+        }
     }
 
     /// The defect this replaced, for the overlay marks this time: both were
@@ -239,6 +274,6 @@ mod test {
 
         assert_ne!(peak_color(&dark), peak_color(&light));
         assert_ne!(filter_color(&dark), filter_color(&light));
-        assert_ne!(harmonic_color(&dark, 1), harmonic_color(&light, 1));
+        assert_ne!(motor_color(&dark, 0), motor_color(&light, 0));
     }
 }

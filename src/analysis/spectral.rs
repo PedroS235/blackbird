@@ -1,4 +1,4 @@
-use super::overlays::{self, FilterOverlay};
+use super::overlays::{self, FilterOverlay, HarmonicBand, OverlayFamily, OverlayShape};
 use crate::parser::metadata::DynNotchConfig;
 use crate::parser::{Axis, FlightData, Metadata, PerAxis};
 use crate::signal::fft::{self, BinnedSpectrum, Psd, SignalAnalyzer, Spectrum};
@@ -102,6 +102,21 @@ impl SpectralAnalysis {
     /// `None` when the axis had no pre-filter gyro to analyse.
     pub fn axis(&self, axis: Axis) -> Option<&AxisSpectral> {
         self.axes[axis].as_ref()
+    }
+
+    /// The motor harmonic geometry, or nothing where the log carried no eRPM.
+    /// One accessor because two panels draw it — the PSD as spans and the
+    /// spectrogram as curves — and both have to draw the same set of motors at
+    /// the same orders. Two copies of this walk would drift apart.
+    pub fn harmonic_bands(&self) -> &[HarmonicBand] {
+        self.overlays
+            .iter()
+            .filter(|o| o.family == OverlayFamily::Harmonics)
+            .find_map(|o| match &o.shape {
+                OverlayShape::Harmonics(bands) => Some(bands.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 }
 

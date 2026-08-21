@@ -9,6 +9,7 @@ use crate::analysis::{
 };
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
+use crate::app::ui::harmonic_key;
 use crate::app::ui::hover;
 use crate::app::ui::overlay_menu::{self, OverlayVisibility};
 use crate::parser::{Axis, PerAxis};
@@ -51,14 +52,29 @@ impl Psd {
             .iter()
             .filter_map(|&axis| analysis.axis(axis))
             .any(|spec| !spec.peaks.is_empty());
-        overlay_menu::show(ui, &mut self.overlays, &analysis.overlays, has_peaks);
+        overlay_menu::show(
+            ui,
+            &mut self.overlays,
+            &OverlayFamily::ALL,
+            |family| analysis.overlays.iter().any(|o| o.family == family),
+            Some(has_peaks),
+        );
+
+        let palette = colors::palette(ui.ctx());
+
+        // Twelve outlines carry no in-plot labels, so the key to them lives
+        // here — and only while the family is drawing, so a clean panel stays
+        // clean.
+        let bands = analysis.harmonic_bands();
+        if self.overlays.shows(OverlayFamily::Harmonics) && !bands.is_empty() {
+            harmonic_key::show(ui, &palette, bands);
+        }
         ui.add_space(4.0);
 
         // After the toggle row, and over the axes that draw: measuring first
         // would size the plots against height the row then took — including
         // the second line it wraps onto on a narrow window.
         let plot_height = stacked_plot_height(ui, drawn_axes(analysis));
-        let palette = colors::palette(ui.ctx());
         let visible: Vec<&FilterOverlay> = analysis
             .overlays
             .iter()
@@ -75,11 +91,8 @@ impl Psd {
                 ui.checkbox(&mut self.filtered_visible[axis], "show filtered");
             });
 
-            let mut readout_series: Vec<(String, &[f64], &[f64])> = vec![(
-                "raw".into(),
-                &spec.raw_psd.freq_hz,
-                &spec.raw_psd.power_db,
-            )];
+            let mut readout_series: Vec<(String, &[f64], &[f64])> =
+                vec![("raw".into(), &spec.raw_psd.freq_hz, &spec.raw_psd.power_db)];
             if self.filtered_visible[axis]
                 && let Some(filtered_psd) = &spec.filtered_psd
             {
@@ -186,28 +199,21 @@ fn draw_overlay(
     }
 }
 
-/// One band per motor per order, coloured by order. Bands overlap where the
-/// motors agree and fan out where one is working harder, which is itself the
-/// diagnosis. Only the first motor of each order carries the label — twelve
-/// labels would bury the curve they are drawn over.
+/// One unfilled span per motor per order: hue is the motor, border style is the
+/// order. Unfilled because twelve fills over a spectrum leave nothing of the
+/// curve the pilot came to read — and because a peak has to be visibly *outside*
+/// these spans for the overlay to say anything, which a wash of translucent
+/// bands cannot do.
+///
+/// No in-plot labels. The key is the legend row above the plots; twelve names
+/// drawn on the curve would bury it.
 fn draw_harmonics(plot_ui: &mut PlotUi<'_>, palette: &Palette, bands: &[HarmonicBand]) {
     for band in bands {
-        let color = colors::harmonic_color(palette, band.order);
-        // A harmonic the RPM filter tracks but takes nothing off is an outline
-        // with no fill: "the filter is here" is not "the filter is working".
-        let fill = match band.filtered {
-            true => color.gamma_multiply_u8(BAND_FILL_ALPHA),
-            false => Color32::TRANSPARENT,
-        };
-        let label = match band.motor {
-            0 => format!("H{}", band.order),
-            _ => String::new(),
-        };
-
         plot_ui.span(
-            Span::new(label, band.low_hz..=band.high_hz)
-                .fill(fill)
-                .border_color(color),
+            Span::new(String::new(), band.low_hz..=band.high_hz)
+                .fill(Color32::TRANSPARENT)
+                .border_color(harmonic_key::band_color(palette, band))
+                .border_style(harmonic_key::order_style(band.order)),
         );
     }
 }

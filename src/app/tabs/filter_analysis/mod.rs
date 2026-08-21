@@ -8,6 +8,8 @@ use egui::Ui;
 
 use super::{TabCtx, tab_bar};
 use crate::analysis::SpectralAnalysis;
+use crate::app::colors;
+use crate::app::ui::overlay_menu::{self, OverlayVisibility};
 use crate::parser::Axis;
 use frequency::Frequency;
 use heatmap_panel::{HeatmapKind, HeatmapPanel};
@@ -51,6 +53,10 @@ pub(super) struct FilterAnalysis {
     frequency: Frequency,
     vs_reference: HeatmapPanel,
     spectrogram: HeatmapPanel,
+    /// The spectrogram's own overlay switches. Its own instance, as every
+    /// sub-tab that has a menu gets one — the PSD's must not move when this
+    /// one is toggled.
+    spectrogram_overlays: OverlayVisibility,
 }
 
 impl FilterAnalysis {
@@ -59,7 +65,7 @@ impl FilterAnalysis {
         // to draw is what greys their tabs out. Rows are borrowed slices — the
         // cost is three `Option` checks each.
         let throttle_rows = vs_reference::rows(&ctx.analysis.spectral);
-        let time_rows = spectrogram::rows(ctx);
+        let mut time_rows = spectrogram::rows(ctx);
 
         tab_bar(
             ui,
@@ -96,6 +102,24 @@ impl FilterAnalysis {
                     .show(ui, HeatmapKind::VsThrottle, throttle_rows)
             }
             FilterAnalysisTab::Spectrogram => {
+                // The menu first, then the curves it asked for: the panel this
+                // one shares with Vs Reference knows nothing about overlays,
+                // and drawing the row here rather than inside it keeps a
+                // toggle effective on the frame it is clicked.
+                overlay_menu::show(
+                    ui,
+                    &mut self.spectrogram_overlays,
+                    &spectrogram::FAMILIES,
+                    |family| spectrogram::available(ctx, family),
+                    None,
+                );
+                ui.add_space(4.0);
+                spectrogram::attach_overlays(
+                    &mut time_rows,
+                    ctx,
+                    self.spectrogram_overlays,
+                    &colors::palette(ui.ctx()),
+                );
                 self.spectrogram
                     .show(ui, HeatmapKind::Spectrogram, time_rows)
             }

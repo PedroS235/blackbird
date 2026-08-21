@@ -9,7 +9,7 @@
 
 use egui::{RichText, Ui};
 
-use crate::analysis::{FilterLoop, FilterOverlay, OverlayFamily};
+use crate::analysis::{FilterLoop, OverlayFamily};
 
 /// Row order is `OverlayFamily::ALL`'s order, and a family's position in it is
 /// that family's visibility flag — so a family the analysis can produce always
@@ -32,7 +32,9 @@ fn title(family: OverlayFamily) -> String {
 fn description(family: OverlayFamily) -> &'static str {
     match family {
         OverlayFamily::Harmonics => {
-            "A band per motor per harmonic order, over the frequencies each motor reached."
+            "One mark per motor per harmonic order — hue is the motor, and solid, dashed and \
+             dotted are the fundamental and its two multiples. On the PSD, the frequencies each \
+             motor spent the flight at; on the spectrogram, each motor's frequency over time."
         }
         OverlayFamily::DynNotch => {
             "The range the dynamic notch may work in, and — where the log was flown in FFT_FREQ \
@@ -69,7 +71,11 @@ fn unavailable_reason(family: OverlayFamily) -> &'static str {
             "This log has no eRPM. Motor harmonics are computed from the RPM the ESCs report \
              back, which needs bidirectional DShot (`set dshot_bidir = ON`)."
         }
-        OverlayFamily::DynNotch => "No dynamic notch was configured on this flight.",
+        OverlayFamily::DynNotch => {
+            "Either no dynamic notch was configured on this flight, or — where the panel draws \
+             the tracker's own centre frequency — the log was not flown in debug mode FFT_FREQ \
+             (`set debug_mode = FFT_FREQ`)."
+        }
         OverlayFamily::Notch(_) => "No static notch was enabled on this flight.",
         OverlayFamily::Lowpass(_) => "No lowpass stage was configured on this flight.",
     }
@@ -111,37 +117,53 @@ impl OverlayVisibility {
 /// The toggle row. A family the log cannot fill greys out with the reason,
 /// rather than vanishing — the same law the tab bar is held to.
 ///
+/// `families` is what the *panel* can draw, which is not every family: the
+/// spectrogram draws harmonics and the notch tracker's centre and nothing
+/// else, and a greyed toggle there would blame the log for a shape the panel
+/// was never going to draw.
+///
+/// `available` is the panel's own answer too, rather than a walk over the
+/// overlay list here: the spectrogram can only draw the dynamic notch's
+/// *traced* centre, which needs a debug mode the mere presence of a dyn-notch
+/// overlay says nothing about. A switch that ticks on and draws nothing is the
+/// second rule this menu exists to remove.
+///
 /// Wrapped, so a narrow window costs a second line rather than clipping a
 /// toggle the pilot then cannot find.
 pub(in crate::app) fn show(
     ui: &mut Ui,
     visibility: &mut OverlayVisibility,
-    overlays: &[FilterOverlay],
-    has_peaks: bool,
+    families: &[OverlayFamily],
+    available: impl Fn(OverlayFamily) -> bool,
+    has_peaks: Option<bool>,
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Overlays").weak());
 
-        toggle(
-            ui,
-            &mut visibility.peaks,
-            PEAKS_TITLE,
-            has_peaks,
-            |on| match on {
-                true => PEAKS_DESCRIPTION.to_string(),
-                false => NO_PEAKS.to_string(),
-            },
-        );
+        // `None` is a panel that draws no peaks at all — not a log without
+        // any. A greyed switch here would state a reason about the log that
+        // is not the reason, so the switch is absent instead.
+        if let Some(has_peaks) = has_peaks {
+            toggle(
+                ui,
+                &mut visibility.peaks,
+                PEAKS_TITLE,
+                has_peaks,
+                |on| match on {
+                    true => PEAKS_DESCRIPTION.to_string(),
+                    false => NO_PEAKS.to_string(),
+                },
+            );
+        }
 
-        for family in MENU_ORDER {
-            let available = overlays.iter().any(|o| o.family == family);
+        for &family in families {
             let flag = flag(family);
 
             toggle(
                 ui,
                 &mut visibility.families[flag],
                 &title(family),
-                available,
+                available(family),
                 |on| match on {
                     true => description(family).to_string(),
                     false => unavailable_reason(family).to_string(),
