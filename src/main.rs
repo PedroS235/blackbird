@@ -26,9 +26,7 @@ fn main() {
                 present_mode: present_mode(
                     std::env::var("BLACKBIRD_PRESENT").ok().as_deref(),
                 ),
-                desired_maximum_frame_latency: std::env::var("BLACKBIRD_LATENCY")
-                    .ok()
-                    .and_then(|v| v.parse().ok()),
+                desired_maximum_frame_latency: None,
             },
             ..Default::default()
         },
