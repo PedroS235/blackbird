@@ -23,8 +23,10 @@ fn main() {
             .with_icon(icon),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             surface: eframe::egui_wgpu::SurfaceConfig {
-                present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
-                desired_maximum_frame_latency: None,
+                present_mode: present_mode(),
+                desired_maximum_frame_latency: std::env::var("BLACKBIRD_LATENCY")
+                    .ok()
+                    .and_then(|v| v.parse().ok()),
             },
             ..Default::default()
         },
@@ -46,5 +48,18 @@ fn main() {
         // The window never came up, or the event loop died. Nothing is left to
         // show it in, so the log is the only place this can be said.
         Err(err) => tracing::error!("Blackbird could not run: {err}"),
+    }
+}
+
+/// `[DEBUG-perf9]` Present mode, overridable so one binary can be run against
+/// each of them. Default unchanged.
+fn present_mode() -> eframe::wgpu::PresentMode {
+    use eframe::wgpu::PresentMode::*;
+    match std::env::var("BLACKBIRD_PRESENT").unwrap_or_default().as_str() {
+        "vsync" => AutoVsync,
+        "fifo" => Fifo,
+        "mailbox" => Mailbox,
+        "immediate" => Immediate,
+        _ => AutoNoVsync,
     }
 }

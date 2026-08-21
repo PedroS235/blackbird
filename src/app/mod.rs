@@ -1,6 +1,7 @@
 mod colors;
 mod log_store;
 mod notification;
+mod perf; // [DEBUG-perf9]
 mod sidepanel;
 mod tabs;
 pub(crate) mod theme;
@@ -32,6 +33,7 @@ pub struct BlackbirdApp {
     tabs: Tabs,
     theme_preference: egui::ThemePreference,
     update: UpdateCheck,
+    perf: Option<perf::Perf>, // [DEBUG-perf9]
 }
 
 impl Default for BlackbirdApp {
@@ -44,12 +46,14 @@ impl Default for BlackbirdApp {
             tabs: Tabs::default(),
             theme_preference: Default::default(),
             update: Default::default(),
+            perf: perf::Perf::from_env(), // [DEBUG-perf9]
         }
     }
 }
 
 impl App for BlackbirdApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let t0 = std::time::Instant::now(); // [DEBUG-perf9]
         ui.ctx().set_theme(self.theme_preference);
         theme::apply(ui.ctx(), ui.ctx().theme() == egui::Theme::Dark);
         self.poll_load(ui.ctx());
@@ -59,6 +63,19 @@ impl App for BlackbirdApp {
         self.show_sidepanel(ui);
         self.show_notifications(ui);
         self.tabs.show(ui, &self.logs);
+
+        // [DEBUG-perf9]
+        let settled = matches!(self.load_state, LoadState::Idle);
+        if let Some(probe) = self.perf.as_mut() {
+            probe.record(ui.ctx(), _frame, t0, settled);
+        }
+    }
+
+    // [DEBUG-perf9]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if let Some(probe) = self.perf.as_mut() {
+            probe.inject(ctx, input);
+        }
     }
 }
 
@@ -66,10 +83,15 @@ impl BlackbirdApp {
     /// `Default` cannot do this: the update check needs the `Context` to wake
     /// the UI when its answer lands, and only `eframe` hands that out.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self {
+        let mut app = Self {
             update: UpdateCheck::spawn(&cc.egui_ctx),
             ..Default::default()
+        };
+        // [DEBUG-perf9] skip the dialog, so the probe runs unattended
+        if let Some(path) = perf::open_path() {
+            app.load(vec![path]);
         }
+        app
     }
 
     pub fn notify(&mut self, level: notification::Level, msg: impl Into<String>) {
@@ -185,7 +207,10 @@ impl BlackbirdApp {
         };
 
         tracing::info!("opening {} file(s) from the picker", paths.len());
+        self.load(paths);
+    }
 
+    fn load(&mut self, paths: Vec<std::path::PathBuf>) {
         self.load_state = LoadState::Loading {
             handle: LogLoader::default().spawn(paths),
             progress: Default::default(),
