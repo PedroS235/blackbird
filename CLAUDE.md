@@ -361,6 +361,9 @@ be read by someone who is not holding the code.
 - **Nothing logs per frame.** Every call site is a load, a parse, an analyser
   run, or a click — `ui`/`tabs` stay silent, because a line per frame at 120 Hz
   is not a log, it is a leak
+- **`BLACKBIRD_LOG_FILE` writes the same output to a file.** The Windows build
+  targets the `windows` subsystem, which has no console attached, so stdout
+  there goes nowhere and `RUST_LOG` alone produces nothing a pilot can paste
 - The update check is the one exception to all of this: every failure there is
   `debug` and nothing reaches the UI (see above)
 
@@ -540,6 +543,7 @@ _(none yet — project is in initial setup)_
 | `ureq` + rustls for the update check, not `reqwest` | One blocking GET does not justify pulling in a tokio runtime, and rustls keeps the single binary free of a libssl dynamic link |
 | Changelog generated at release time, not tracked | It is derived from the commits. A generated file in the tree drifts from the tag it describes, and regenerating it by hand was a step that got skipped — the 0.7.0 release shipped with its section still headed `[unreleased]` |
 | Tag-vs-`Cargo.toml` gate as the first CI job | The version the binary reports is what the update check compares; drift makes it lie to every user. Fails in seconds instead of after six matrix builds |
+| Frames are presented vsynced, `BLACKBIRD_PRESENT` overrides | Windows DX12 honours `Immediate`, and presenting uncapped starved the compositor until the whole desktop froze — measured over 900 frames per arm, DX12-uncapped was the only red one: Vulkan uncapped and DX12 vsynced were both clean. Linux never showed it because Wayland/RADV has no `Immediate` to honour and had been silently clamping to 59.8 fps all along. A log analyser gains nothing from frames the monitor cannot show |
 | AI as trait with two backends | Anthropic for quality, Ollama for offline/privacy. Swappable at runtime |
 | `prompt.rs` isolated from API plumbing | Prompt is a product decision iterated independently of transport code |
 
