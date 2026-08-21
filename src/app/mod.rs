@@ -9,6 +9,7 @@ mod update;
 
 use std::{collections::VecDeque, sync::mpsc};
 
+use blackbird::version;
 use eframe::App;
 use elegance::ProgressBar;
 
@@ -36,7 +37,7 @@ pub struct BlackbirdApp {
 
 impl Default for BlackbirdApp {
     fn default() -> Self {
-        tracing::info!("Blackbird app started");
+        tracing::info!("Blackbird v{} app started", version::CURRENT);
         Self {
             app_name: "Blackbird",
             logs: Default::default(),

@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 /// What `cargo build` stamped in. `release.yml` refuses to publish a tag that
 /// disagrees with it, so a binary can always name its own version honestly.
-const CURRENT: &str = env!("CARGO_PKG_VERSION");
+pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/PedroS235/blackbird/releases/latest";
 
