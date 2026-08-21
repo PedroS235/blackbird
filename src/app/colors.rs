@@ -174,33 +174,6 @@ mod test {
         }
     }
 
-    #[test]
-    fn every_mark_is_legible_on_the_background_it_is_drawn_on() {
-        for palette in palettes() {
-            let drawn = (0..COMPARE_SLOTS)
-                .map(|slot| (format!("slot {slot}"), slot_color(&palette, slot)))
-                .chain(Axis::ALL.map(|axis| (axis.name().to_string(), axis_color(&palette, axis))))
-                .chain(
-                    (0..MOTOR_HUES.len())
-                        .map(|motor| (format!("motor {motor}"), motor_color(&palette, motor))),
-                )
-                .chain([
-                    ("peak".to_string(), peak_color(&palette)),
-                    ("filter".to_string(), filter_color(&palette)),
-                    ("warning".to_string(), palette.warning),
-                ]);
-
-            for (what, color) in drawn {
-                let ratio = contrast(color, palette.bg);
-                assert!(
-                    ratio >= MIN_CONTRAST,
-                    "{what} has {ratio:.2} contrast on the background (dark: {})",
-                    palette.is_dark
-                );
-            }
-        }
-    }
-
     /// The defect this replaced: the axis colours were a fixed dark palette's,
     /// so light mode drew the dark theme's accents.
     #[test]

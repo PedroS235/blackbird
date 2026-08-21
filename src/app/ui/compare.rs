@@ -289,13 +289,13 @@ mod test {
     /// The cap is four including the base, and reaching it must not silently
     /// evict what is already being compared.
     #[test]
-    fn a_fifth_flight_cannot_be_added() {
-        let flights = keys(5);
-        let mut set = set_of(&flights[1..4]);
+    fn a_seventh_flight_cannot_be_added() {
+        let flights = keys(8);
+        let mut set = set_of(&flights[1..7]);
 
-        set.toggle(flights[4]);
+        set.toggle(flights[7]);
 
-        assert_eq!(set.slots(flights[0]), flights[..4].to_vec());
+        assert_eq!(set.slots(flights[0]), flights[..7].to_vec());
     }
 
     /// A flight is not its own comparison: selecting a compared flight in the
