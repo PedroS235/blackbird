@@ -9,11 +9,11 @@ use crate::parser::Axis;
 
 /// How many flights a comparison can hold, and so how many colours it can
 /// need. Four: past that the plot is mud and the chips no longer fit a row.
-pub(in crate::app) const COMPARE_SLOTS: usize = 4;
+pub(in crate::app) const COMPARE_SLOTS: usize = 7;
 
 /// Fixed hues — blue, orange, teal, magenta — so "log 3 is the teal one"
 /// survives a theme toggle mid-session. Only luminance comes from the palette.
-const SLOT_HUES: [f32; COMPARE_SLOTS] = [0.58, 0.08, 0.45, 0.87];
+const SLOT_HUES: [f32; COMPARE_SLOTS] = [0.0, 0.08, 0.20, 0.30, 0.47, 0.65, 0.81];
 
 /// Fixed hues for the harmonic orders — amber, violet, spring green — in the
 /// same spirit as the compare slots: "the amber band is the fundamental"
@@ -32,7 +32,7 @@ const FILTER_HUE: f32 = 0.63;
 /// back: dropping luminance would cost contrast against the background in one
 /// theme or the other, whichever way it went.
 const BASE_SATURATION: f32 = 0.95;
-const COMPARED_SATURATION: f32 = 0.55;
+const COMPARED_SATURATION: f32 = 0.75;
 
 /// The installed palette. Read per frame rather than captured: the app's
 /// resolved light/dark state changes at any time (system theme, or the
@@ -96,7 +96,7 @@ fn hue_color(palette: &Palette, hue: f32, saturation: f32) -> Color32 {
     HsvaGamma {
         h: hue,
         s: saturation,
-        v: if palette.is_dark { 0.95 } else { 0.55 },
+        v: if palette.is_dark { 1.0 } else { 0.90 },
         a: 1.0,
     }
     .into()
