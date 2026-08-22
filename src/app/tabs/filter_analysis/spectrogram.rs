@@ -1,30 +1,29 @@
 use egui_plot::LineStyle;
 use elegance::Palette;
 
+use super::filter_marks;
 use super::heatmap_panel::HeatmapRow;
-use crate::analysis::{HarmonicBand, OverlayFamily};
+use crate::analysis::{FilterLoop, HarmonicBand, OverlayFamily};
 use crate::app::colors;
 use crate::app::tabs::TabCtx;
 use crate::app::ui::harmonic_key;
 use crate::app::ui::heatmap::OverlaySeries;
+use crate::app::ui::hover;
 use crate::app::ui::overlay_menu::OverlayVisibility;
 use crate::parser::{Axis, Channel, FlightData, Metadata};
 
-/// What this panel can draw. Not every family: everything else in the menu is a
-/// shape in frequency alone, and this is the one panel with a time axis.
-pub(super) const FAMILIES: [OverlayFamily; 2] = [OverlayFamily::Harmonics, OverlayFamily::DynNotch];
+/// Every family. This panel used to list two, because a static stage has no
+/// time axis to draw against — but a frequency the pilot configured is worth
+/// knowing where the noise band sits relative to it, and a stage the throttle
+/// drove has a real curve here: the stick against time is in the log.
+pub(super) const FAMILIES: [OverlayFamily; OverlayFamily::ALL.len()] = OverlayFamily::ALL;
 
-/// Whether this log can fill one of them — the panel's own answer, because the
-/// dynamic notch's *traced* centre is the only part of that family with a time
-/// axis, and it needs a debug mode that a configured notch says nothing about.
-/// A switch that ticks on and draws nothing is what the shared menu exists to
-/// prevent.
+/// Whether this log can fill one of them. The dyn notch is drawable from its
+/// configured bounds alone — its *traced* centre needs `FFT_FREQ`, which is
+/// gated where that curve is built rather than here, so a pilot without the
+/// debug mode still gets the bounds instead of a greyed switch.
 pub(super) fn available(ctx: &TabCtx<'_>, family: OverlayFamily) -> bool {
-    match family {
-        OverlayFamily::Harmonics => !ctx.analysis.spectral.harmonic_bands().is_empty(),
-        OverlayFamily::DynNotch => logs_trace(ctx),
-        _ => false,
-    }
+    filter_marks::available(&ctx.analysis.spectral.overlays, family)
 }
 
 fn logs_trace(ctx: &TabCtx<'_>) -> bool {
@@ -46,6 +45,7 @@ pub(super) fn rows<'a>(ctx: &TabCtx<'a>) -> Vec<HeatmapRow<'a>> {
                 axis,
                 spectrum,
                 overlays: Vec::new(),
+                marks: Vec::new(),
             })
         })
         .collect()
@@ -74,6 +74,13 @@ pub(super) fn attach_overlays<'a>(
     };
 
     let trace = visibility.shows(OverlayFamily::DynNotch) && logs_trace(ctx);
+    let visible: Vec<_> = ctx
+        .analysis
+        .spectral
+        .overlays
+        .iter()
+        .filter(|o| visibility.shows(o.family))
+        .collect();
 
     for row in rows {
         row.overlays = harmonics.clone();
@@ -83,11 +90,30 @@ pub(super) fn attach_overlays<'a>(
                 ctx.flight,
                 samples,
                 1.0,
-                colors::filter_color(palette),
+                colors::chain_color(palette, FilterLoop::Gyro),
                 LineStyle::Solid,
             ));
         }
+
+        // The filter geometry, against time. A stage the throttle drove is a
+        // real curve here — the stick at each moment is in the log, so the
+        // cutoff at each moment is too.
+        let bins = &row.spectrum.bin_centers;
+        row.marks = visible
+            .iter()
+            .flat_map(|overlay| {
+                filter_marks::marks(overlay, bins, &|at_s| throttle_at(ctx, at_s), palette)
+            })
+            .collect();
     }
+}
+
+/// The stick at one moment of the flight, as the log records it. Interpolated
+/// rather than binned: the map's bins are already the resolution the curve is
+/// drawn at, and one lookup per bin is cheaper than a pass over the channel.
+fn throttle_at(ctx: &TabCtx<'_>, at_s: f64) -> Option<f64> {
+    let throttle = ctx.flight.throttle()?;
+    hover::y_at_us(ctx.flight.time_us(), throttle, ctx.flight.start_us(), at_s)
 }
 
 /// One curve per band: that motor's eRPM, converted to hertz and multiplied by

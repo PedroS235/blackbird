@@ -23,9 +23,7 @@ fn main() {
             .with_icon(icon),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             surface: eframe::egui_wgpu::SurfaceConfig {
-                present_mode: present_mode(
-                    std::env::var("BLACKBIRD_PRESENT").ok().as_deref(),
-                ),
+                present_mode: present_mode(std::env::var("BLACKBIRD_PRESENT").ok().as_deref()),
                 desired_maximum_frame_latency: None,
             },
             ..Default::default()

@@ -146,9 +146,20 @@ impl GyroNoiseAnalyzer {
             })
         }));
 
+        // Every axis is analysed over the same window at the same rate, so
+        // one grid serves them all — the overlays' gains are precomputed on
+        // it, and the panel's chain total is then a product over the raw
+        // trace's own bins.
+        let spectrum_hz = Axis::ALL
+            .iter()
+            .filter_map(|&axis| axes[axis].as_ref())
+            .map(|spec| spec.raw_psd.freq_hz.clone())
+            .next()
+            .unwrap_or_default();
+
         let analysis = SpectralAnalysis {
             axes,
-            overlays: overlays::build(&fd, metadata),
+            overlays: overlays::build(&fd, metadata, &spectrum_hz),
         };
 
         tracing::debug!(

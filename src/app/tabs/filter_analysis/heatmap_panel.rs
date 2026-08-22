@@ -2,7 +2,7 @@ use egui::{RichText, Ui};
 use elegance::Slider;
 
 use crate::app::tabs::stacked_plot_height;
-use crate::app::ui::heatmap::{Heatmap, HeatmapOrientation, OverlaySeries};
+use crate::app::ui::heatmap::{Heatmap, HeatmapOrientation, OverlayMark, OverlaySeries};
 use crate::parser::Axis;
 use crate::signal::fft::BinnedSpectrum;
 
@@ -11,7 +11,10 @@ use crate::signal::fft::BinnedSpectrum;
 pub(super) struct HeatmapRow<'a> {
     pub(super) axis: Axis,
     pub(super) spectrum: &'a BinnedSpectrum,
+    /// Logged channels, decimated per frame against the visible window.
     pub(super) overlays: Vec<OverlaySeries<'a>>,
+    /// Filter geometry, in this map's own axes.
+    pub(super) marks: Vec<OverlayMark>,
 }
 
 /// Which heatmap this is. The two differ only in orientation, wording and plot
@@ -103,6 +106,7 @@ impl HeatmapPanel {
                 height,
                 floor_db: self.floor_db as f64,
                 overlays: row.overlays,
+                marks: row.marks,
             }
             .show(ui);
         }

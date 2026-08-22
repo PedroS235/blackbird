@@ -35,7 +35,11 @@ pub fn y_at_us(time_us: &[u64], ys: &[f64], t0: u64, x_s: f64) -> Option<f64> {
         .partition_point(|&v| (v as f64) <= target)
         .clamp(1, n - 1);
     let (x0, x1) = (time_us[i - 1] as f64, time_us[i] as f64);
-    let t = if x1 > x0 { (target - x0) / (x1 - x0) } else { 0.0 };
+    let t = if x1 > x0 {
+        (target - x0) / (x1 - x0)
+    } else {
+        0.0
+    };
     Some(ys[i - 1] + t * (ys[i] - ys[i - 1]))
 }
 

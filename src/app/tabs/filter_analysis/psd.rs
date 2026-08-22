@@ -1,11 +1,14 @@
-use egui::{Align2, RichText, Ui, Vec2b};
-use egui_plot::{HLine, Line, Plot, PlotPoint, PlotPoints, PlotUi, Span, Text, VLine};
+use egui::{Align2, Color32, Id, Pos2, Rect, RichText, Stroke, Ui, Vec2b};
+use egui_plot::{
+    FilledArea, HLine, Line, Plot, PlotPoint, PlotPoints, PlotTransform, PlotUi, Text, VLine,
+};
 use elegance::Palette;
 
 use super::drawn_axes;
+use crate::analysis::filter_response::MIN_GAIN_DB;
 use crate::analysis::{
-    AxisSpectral, DynNotchReach, FilterOverlay, FilterResponse, FrequencyPeak, HarmonicBand,
-    OverlayFamily, OverlayShape, SpectralAnalysis,
+    AxisSpectral, Dwell, DynNotchReach, FilterLoop, FilterOverlay, FilterResponse, FrequencyPeak,
+    HarmonicBand, OverlayFamily, OverlayShape, SpectralAnalysis,
 };
 use crate::app::colors;
 use crate::app::tabs::stacked_plot_height;
@@ -20,19 +23,42 @@ use crate::signal::fft::Psd as PsdData;
 /// three loudest are the ones a pilot is filtering for anyway.
 const LABELLED_PEAKS: usize = 3;
 
-/// Fill alpha for a band the filter is actually attenuating. Low enough that
-/// the curve reads through a stack of overlapping harmonics.
-const BAND_FILL_ALPHA: u8 = 28;
+/// The chain total against the stage curves under it. Within a chain the
+/// separation is width and alpha, never hue: hue is spent on which loop, which
+/// is the fact a pilot cannot derive from the shape.
+const CHAIN_WIDTH: f32 = 2.0;
+const STAGE_WIDTH: f32 = 1.0;
+const STAGE_ALPHA: f32 = 0.55;
+
+/// What the chain removed, as an area. Low enough that the raw trace and a
+/// harmonic recolour both read through it.
+const FILL_ALPHA: u8 = 45;
+
+/// The dwell lane: how much of the visible y span the strip along the floor
+/// takes, and how solid it is. A fraction of the bounds rather than a span in
+/// decibels, so the lane holds its height when the pilot zooms.
+const LANE_FRACTION: f64 = 0.10;
+const LANE_ALPHA: u8 = 130;
+
+/// Where in its lane a bounds marker sits — a filter that was *allowed*
+/// anywhere in a range, with nothing logged to say where it went.
+const ALLOWED_HEIGHT: f64 = 0.5;
 
 /// A harmonic's stretch is drawn over the raw trace, so it is drawn thicker —
 /// at the same width the recolour would read as the curve rather than as a mark
 /// on it.
 const HARMONIC_WIDTH: f32 = 2.0;
 
-/// The traced response is a gain curve, and the plot's y axis is signal power.
-/// Its zero is pinned to the loudest bin of this axis's own spectrum, so the V
-/// hangs over the noise it is cutting, at the same decibels per pixel, and
-/// stays put when the pilot zooms.
+/// The D-term chain's unity gain: the one reference line left on this plot,
+/// and the only thing this level is now used for.
+///
+/// The PSD plots gyro power — `raw_psd` from `gyroUnfilt`, `filtered_psd` from
+/// `gyroADC`. The D-term lowpasses never touched that signal, so anchoring
+/// them to the raw curve would claim an attenuation that did not happen to the
+/// trace being drawn. They hang from this line instead, pinned to the loudest
+/// bin of this axis's own spectrum so the curves sit over the noise the D-term
+/// stage had to survive, at the same decibels per pixel, and stay put when the
+/// pilot zooms.
 fn response_anchor_db(spec: &AxisSpectral) -> f64 {
     spec.raw_psd
         .power_db
@@ -62,6 +88,7 @@ impl Psd {
             ui,
             &mut self.overlays,
             &OverlayFamily::ALL,
+            overlay_menu::Drawn::OnSpectrum,
             |family| analysis.overlays.iter().any(|o| o.family == family),
             Some(has_peaks),
         );
@@ -109,7 +136,10 @@ impl Psd {
                 ));
             }
 
-            Plot::new(plot_id(axis))
+            let plot = Plot::new(plot_id(axis))
+                // Named explicitly rather than derived from this `Ui`'s id
+                // path, so a test can read back the bounds the plot settled on.
+                .id(Id::new(plot_id(axis)))
                 .label_formatter(hover::readout("Hz", 1, readout_series))
                 .height(plot_height)
                 .x_axis_label("Hz")
@@ -145,14 +175,17 @@ impl Psd {
                         );
                     }
 
-                    let anchor_db = response_anchor_db(spec);
-                    for overlay in &visible {
-                        draw_overlay(plot_ui, &palette, overlay, axis, anchor_db, &spec.raw_psd);
-                    }
+                    draw_overlays(plot_ui, &palette, &visible, axis, spec);
                     if self.overlays.shows_peaks() {
                         draw_peaks(plot_ui, &palette, spec);
                     }
                 });
+
+            // After the plot, in screen space: the lane is a strip of the
+            // plot, and an item inside it would be part of the bounds the plot
+            // fits itself to — which grows by its own margin every frame a
+            // strip pinned to the bottom of it is added.
+            draw_dwell_lane(ui, &palette, &plot.transform, &visible, axis);
 
             // Under the plot rather than on it: the verdict has to survive the
             // pilot zooming the offending peak off screen. It follows the
@@ -175,7 +208,122 @@ fn plot_id(axis: Axis) -> String {
     format!("psd_plot_{}", axis.name())
 }
 
-fn draw_overlay(
+/// Everything the pilot ticked, in the order it has to be drawn: the fill
+/// under the raw trace first, then the chain total over it, then the stages,
+/// the harmonic recolours, and the dwell lane along the floor.
+fn draw_overlays(
+    plot_ui: &mut PlotUi<'_>,
+    palette: &Palette,
+    visible: &[&FilterOverlay],
+    axis: Axis,
+    spec: &AxisSpectral,
+) {
+    let psd = &spec.raw_psd;
+    let anchor_db = response_anchor_db(spec);
+
+    if let Some(gain_db) = chain_gain_db(visible, axis, FilterLoop::Gyro, psd.power_db.len()) {
+        draw_chain(plot_ui, palette, psd, &gain_db);
+    }
+
+    // The D-term chain's own zero, drawn only while a D-term family is on: a
+    // curve with no reference is a shape with no scale, and "how far down" is
+    // the whole question.
+    if shows(visible, FilterLoop::Dterm) && anchor_db.is_finite() {
+        let color = colors::chain_color(palette, FilterLoop::Dterm);
+        plot_ui
+            .hline(HLine::new("D-term 0 dB", anchor_db).color(color.gamma_multiply(STAGE_ALPHA)));
+    }
+
+    for overlay in visible {
+        draw_shape(plot_ui, palette, overlay, axis, anchor_db, psd);
+    }
+}
+
+fn shows(visible: &[&FilterOverlay], loop_: FilterLoop) -> bool {
+    visible
+        .iter()
+        .any(|o| o.family.filter_loop() == Some(loop_))
+}
+
+/// What one chain's *visible* stages took off, in dB per spectrum bin — the
+/// elementwise product of their precomputed power gains.
+///
+/// Per frame, and over the visible stages only. A fixed whole-chain total would
+/// lie to a pilot who switched the dynamic notch off and still saw its cut in
+/// it; and multiplying five arrays of five hundred floats is arithmetic, not a
+/// recomputation, so nothing about a toggle is expensive.
+fn chain_gain_db(
+    visible: &[&FilterOverlay],
+    axis: Axis,
+    loop_: FilterLoop,
+    bins: usize,
+) -> Option<Vec<f64>> {
+    let gains: Vec<&[f64]> = visible
+        .iter()
+        .filter(|o| o.family.filter_loop() == Some(loop_))
+        .filter_map(|o| o.gain.as_ref()?.get(axis))
+        .map(Vec::as_slice)
+        .filter(|gain| gain.len() == bins)
+        .collect();
+
+    (!gains.is_empty() && bins > 0).then(|| {
+        (0..bins)
+            .map(|i| {
+                let power: f64 = gains.iter().map(|gain| gain[i]).product();
+                (10.0 * power.log10()).max(MIN_GAIN_DB)
+            })
+            .collect()
+    })
+}
+
+/// The chain total, on the data: `raw_db − chain_gain_db`, at the raw curve's
+/// own frequencies, with the region between the two filled.
+///
+/// That fill *is* the energy the chain removed — thick where the chain worked,
+/// a hairline where it did nothing — so "where is this filter actually being
+/// used" is read as "where is the fill thick", with no legend and no
+/// arithmetic in decibels. No threshold: it is drawn everywhere the two differ
+/// at all, because a cut-in at some number of dB would draw a vertical edge the
+/// physics does not have.
+fn draw_chain(plot_ui: &mut PlotUi<'_>, palette: &Palette, psd: &PsdData, gain_db: &[f64]) {
+    let Some((freq, raw, total)) = chain_edges(psd, gain_db) else {
+        return;
+    };
+    let color = colors::chain_color(palette, FilterLoop::Gyro);
+
+    plot_ui.add(
+        FilledArea::new("gyro chain removed", freq, &total, raw)
+            .fill_color(color.gamma_multiply_u8(FILL_ALPHA))
+            .allow_hover(false),
+    );
+    plot_ui.line(
+        Line::new(
+            "gyro chain",
+            total
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| [freq[i], v])
+                .collect::<PlotPoints>(),
+        )
+        .color(color)
+        .width(CHAIN_WIDTH),
+    );
+}
+
+/// The frequencies, the raw trace and the chain total across them — the fill's
+/// two edges. Both are the spectrum's own bins, so the fill needs no
+/// resampling and cannot disagree with the trace it hangs under.
+fn chain_edges<'a>(psd: &'a PsdData, gain_db: &[f64]) -> Option<(&'a [f64], &'a [f64], Vec<f64>)> {
+    let n = gain_db.len().min(psd.power_db.len()).min(psd.freq_hz.len());
+    if n < 2 {
+        return None;
+    }
+    let (freq, raw) = (&psd.freq_hz[..n], &psd.power_db[..n]);
+
+    Some((freq, raw, (0..n).map(|i| raw[i] + gain_db[i]).collect()))
+}
+
+fn draw_shape(
     plot_ui: &mut PlotUi<'_>,
     palette: &Palette,
     overlay: &FilterOverlay,
@@ -183,26 +331,93 @@ fn draw_overlay(
     anchor_db: f64,
     psd: &PsdData,
 ) {
-    let color = colors::filter_color(palette);
+    let loop_ = overlay.family.filter_loop();
+    let color = chain_color(palette, loop_);
+
+    // Where a stage curve hangs. A gyro stage acted on the signal this plot
+    // draws, so it hangs off the raw trace's own points; a D-term stage did
+    // not, so it hangs off its own unity gain and never touches the data.
+    let base: Box<dyn Fn(f64) -> Option<f64>> = match loop_ {
+        Some(FilterLoop::Dterm) => Box::new(move |_| anchor_db.is_finite().then_some(anchor_db)),
+        _ => Box::new(|freq_hz| hover::y_at(&psd.freq_hz, &psd.power_db, freq_hz)),
+    };
 
     match &overlay.shape {
         OverlayShape::Line { hz } => {
-            plot_ui.vline(VLine::new(overlay.label.clone(), *hz).color(color))
+            plot_ui.vline(VLine::new(overlay.label.clone(), *hz).color(color));
         }
-        OverlayShape::Band { low_hz, high_hz } => plot_ui.span(
-            Span::new(overlay.label.clone(), *low_hz..=*high_hz)
-                .fill(color.gamma_multiply_u8(BAND_FILL_ALPHA))
-                .border_color(color),
-        ),
+        // Where it was allowed to be, which is not what it removed: drawn in
+        // the floor lane that means exactly that.
+        OverlayShape::Allowed { .. } => {}
         OverlayShape::Harmonics(bands) => draw_harmonics(plot_ui, palette, bands, psd),
         OverlayShape::Response(response) => {
-            draw_response(plot_ui, palette, response, anchor_db, &overlay.label)
+            draw_stage(plot_ui, response, color, &overlay.label, true, &base);
+        }
+        // Two rolloffs at the configured extremes. The label goes on the lower
+        // corner only — the same stage twice over is one stage.
+        OverlayShape::Envelope { low, high } => {
+            draw_stage(plot_ui, low, color, &overlay.label, true, &base);
+            draw_stage(plot_ui, high, color, &overlay.label, false, &base);
         }
         OverlayShape::Traced(per_axis) => {
             if let Some(response) = per_axis[axis].as_ref() {
-                draw_response(plot_ui, palette, response, anchor_db, &overlay.label);
+                draw_stage(plot_ui, response, color, &overlay.label, true, &base);
             }
         }
+    }
+}
+
+fn chain_color(palette: &Palette, loop_: Option<FilterLoop>) -> Color32 {
+    match loop_ {
+        Some(loop_) => colors::chain_color(palette, loop_),
+        None => palette.text_faint,
+    }
+}
+
+/// One stage's own curve, thin and dimmed under the total.
+///
+/// A notch is a V and a lowpass is a rolloff, from the fine 512-point
+/// response, anchored at each of its own frequencies. These are shape, not
+/// magnitude: which of three overlapping stages owns a given bin is not a
+/// question the plot tries to answer, because the honest answer is "all of
+/// them, multiplied" — and that is what the chain total says.
+fn draw_stage(
+    plot_ui: &mut PlotUi<'_>,
+    response: &FilterResponse,
+    color: Color32,
+    label: &str,
+    named: bool,
+    base: &dyn Fn(f64) -> Option<f64>,
+) {
+    let color = color.gamma_multiply(STAGE_ALPHA);
+    let curve: PlotPoints = response
+        .freq_hz
+        .iter()
+        .zip(&response.gain_db)
+        .filter_map(|(&f, &gain)| Some([f, base(f)? + gain]))
+        .collect();
+    plot_ui.line(
+        Line::new(label.to_string(), curve)
+            .color(color)
+            .width(STAGE_WIDTH),
+    );
+
+    // Curves within a chain share one colour, so each says which stage it is
+    // at the point it starts taking something — a notch's near edge, a
+    // lowpass's corner.
+    if named
+        && let Some((freq, gain)) = response.corner()
+        && let Some(base) = base(freq)
+    {
+        plot_ui.text(
+            Text::new(
+                format!("{label}_label"),
+                PlotPoint::new(freq, base + gain),
+                label,
+            )
+            .color(color)
+            .anchor(Align2::CENTER_TOP),
+        );
     }
 }
 
@@ -267,50 +482,94 @@ fn spectrum_run(psd: &PsdData, band: &HarmonicBand) -> Option<PlotPoints<'static
     )
 }
 
-/// What a filter actually took off, as the shape it really has.
+/// Where the dynamic stages spent their time, as a filled histogram along the
+/// floor of the plot.
 ///
-/// A notch is a V and a lowpass is a rolloff. Both were drawn as a line or a
-/// band, which a pilot reads as "everything in here is gone" — the one thing
-/// neither does. A filter that moved during the flight is the average of the
-/// settings it moved through, so one held still draws its own curve and one
-/// swept draws the shallower, wider average of the corners it passed.
-fn draw_response(
-    plot_ui: &mut PlotUi<'_>,
+/// Time is a third variable on a plot whose two axes are spent, so it gets its
+/// own strip of pixels rather than being encoded into the curve: a curve faded
+/// by dwell reads as uncertainty, which is a different and wrong claim, and is
+/// indistinguishable from a curve that is merely shallow. A pinned notch is a
+/// spike and a roaming one a plateau — the distinction the weighted average
+/// has exactly divided out of the curve above.
+///
+/// Painted in screen space after the plot, from its transform, rather than
+/// added to it as bar charts. The lane is a strip of the *plot*, not a series
+/// in the data's decibels: as plot items its bars would join the bounds the
+/// plot fits itself to, and a strip pinned to the bottom of those bounds
+/// re-sinks the floor by the plot's own margin on every frame — the spectrum
+/// shrank a little each time the pointer moved. Painting it takes it out of
+/// that loop and gives it a true fixed height, clipped to the plot's frame so
+/// nothing lands in the axis labels.
+fn draw_dwell_lane(
+    ui: &Ui,
     palette: &Palette,
-    response: &FilterResponse,
-    anchor_db: f64,
-    label: &str,
+    transform: &PlotTransform,
+    visible: &[&FilterOverlay],
+    axis: Axis,
 ) {
-    if !anchor_db.is_finite() {
-        return;
-    }
-    let color = colors::filter_color(palette);
+    let frame = *transform.frame();
+    let (floor, lane) = (frame.bottom(), frame.height() as f64 * LANE_FRACTION);
+    let x_at = |hz: f64| transform.position_from_point(&PlotPoint::new(hz, 0.0)).x;
 
-    let curve: PlotPoints = response
+    // One scale across the whole lane, so a pinned stage reads as taller than
+    // a roaming one instead of every stage filling the lane to the brim.
+    let peak = visible
+        .iter()
+        .filter_map(|o| o.dwell.as_ref()?.get(axis))
+        .flat_map(|dwell| dwell.weight.iter().copied())
+        .fold(0.0, f64::max);
+
+    let painter = ui.painter().with_clip_rect(frame);
+    for overlay in visible {
+        let color = chain_color(palette, overlay.family.filter_loop());
+
+        match (
+            &overlay.shape,
+            overlay.dwell.as_ref().and_then(|d| d.get(axis)),
+        ) {
+            (_, Some(dwell)) if peak > 0.0 => {
+                for (low_hz, high_hz, height) in lane_bars(dwell, peak, lane) {
+                    painter.rect_filled(
+                        Rect::from_x_y_ranges(
+                            x_at(low_hz)..=x_at(high_hz),
+                            floor - height as f32..=floor,
+                        ),
+                        0.0,
+                        color.gamma_multiply_u8(LANE_ALPHA),
+                    );
+                }
+            }
+            // Bounds, with nothing logged to say where inside them the filter
+            // went. That is the same kind of claim as dwell — where it was
+            // allowed to be — so it belongs in the lane that means that, not
+            // as a span over the spectrum.
+            (&OverlayShape::Allowed { low_hz, high_hz }, _) => {
+                let y = floor - (lane * ALLOWED_HEIGHT) as f32;
+                painter.line_segment(
+                    [Pos2::new(x_at(low_hz), y), Pos2::new(x_at(high_hz), y)],
+                    Stroke::new(CHAIN_WIDTH, color),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One bar per visited bin, as `(low_hz, high_hz, height)` — scaled against the
+/// tallest dwell on the plot, and never taller than the lane.
+fn lane_bars(dwell: &Dwell, peak: f64, lane: f64) -> Vec<(f64, f64, f64)> {
+    let width = match dwell.freq_hz.as_slice() {
+        [first, second, ..] => second - first,
+        _ => 1.0,
+    };
+
+    dwell
         .freq_hz
         .iter()
-        .zip(&response.gain_db)
-        .map(|(&f, &gain)| [f, anchor_db + gain])
-        .collect();
-    plot_ui.line(Line::new(label.to_string(), curve).color(color));
-
-    // The line every curve is measured down from — without it a curve is a
-    // shape with no scale, and "how far down" is the whole question.
-    plot_ui.hline(HLine::new(String::new(), anchor_db).color(color.gamma_multiply(0.4)));
-
-    // Curves share one colour, so each says which stage it is at the point it
-    // starts taking something — a notch's near edge, a lowpass's corner.
-    if let Some((freq, gain)) = response.corner() {
-        plot_ui.text(
-            Text::new(
-                format!("{label}_label"),
-                PlotPoint::new(freq, anchor_db + gain),
-                label,
-            )
-            .color(color)
-            .anchor(Align2::CENTER_TOP),
-        );
-    }
+        .zip(&dwell.weight)
+        .filter(|&(_, &weight)| weight > 0.0)
+        .map(|(&hz, &weight)| (hz - width / 2.0, hz + width / 2.0, weight / peak * lane))
+        .collect()
 }
 
 /// One mark per peak, and a label on the loudest few. A peak the dynamic notch
@@ -419,7 +678,7 @@ fn dyn_notch_range(overlays: &[FilterOverlay]) -> Option<(f64, f64)> {
         .iter()
         .filter(|o| o.family == OverlayFamily::DynNotch)
         .find_map(|o| match o.shape {
-            OverlayShape::Band { low_hz, high_hz } => Some((low_hz, high_hz)),
+            OverlayShape::Allowed { low_hz, high_hz } => Some((low_hz, high_hz)),
             _ => None,
         })
 }
@@ -479,15 +738,25 @@ mod test {
         }
     }
 
+    fn overlay(family: OverlayFamily, shape: OverlayShape) -> FilterOverlay {
+        FilterOverlay {
+            label: format!("{family:?}"),
+            family,
+            shape,
+            gain: None,
+            dwell: None,
+            driven: None,
+        }
+    }
+
     fn dyn_notch_overlay() -> Vec<FilterOverlay> {
-        vec![FilterOverlay {
-            label: "Dyn notch range".to_string(),
-            family: OverlayFamily::DynNotch,
-            shape: OverlayShape::Band {
+        vec![overlay(
+            OverlayFamily::DynNotch,
+            OverlayShape::Allowed {
                 low_hz: 90.0,
                 high_hz: 400.0,
             },
-        }]
+        )]
     }
 
     #[test]
@@ -589,6 +858,231 @@ mod test {
     fn a_band_overhanging_the_last_bin_is_cut_to_the_spectrum() {
         let run = spectrum_run(&psd(), &band(800.0, 5000.0)).expect("the band starts in range");
         assert_eq!(xs(run).last().copied(), Some(900.0));
+    }
+
+    fn staged(family: OverlayFamily, gain: Vec<f64>) -> FilterOverlay {
+        FilterOverlay {
+            gain: Some(crate::analysis::ByAxis::Shared(gain)),
+            ..overlay(family, OverlayShape::Line { hz: 0.0 })
+        }
+    }
+
+    /// The arithmetic no pilot can do by eye: three stages cutting one
+    /// frequency take off the product of their gains, which the panel drew as
+    /// three separate curves in one colour and left to be multiplied by sight.
+    #[test]
+    fn the_chain_total_is_the_product_of_the_visible_stages() {
+        let stages = [
+            staged(OverlayFamily::Lowpass(FilterLoop::Gyro), vec![0.5, 0.25]),
+            staged(OverlayFamily::Notch(FilterLoop::Gyro), vec![0.5, 1.0]),
+        ];
+        let visible: Vec<&FilterOverlay> = stages.iter().collect();
+
+        let total = chain_gain_db(&visible, Axis::Roll, FilterLoop::Gyro, 2).expect("two stages");
+
+        // 0.25 of the power is 6 dB down, 0.25 × 1.0 the same.
+        assert!(
+            (total[0] - 10.0 * 0.25f64.log10()).abs() < 1e-9,
+            "{total:?}"
+        );
+        assert!(
+            (total[1] - 10.0 * 0.25f64.log10()).abs() < 1e-9,
+            "{total:?}"
+        );
+    }
+
+    /// The reason the total is a per-frame product rather than a stored one: a
+    /// fixed whole-chain total lies to a pilot who switched a family off and
+    /// still sees its cut in the curve.
+    #[test]
+    fn hiding_a_family_drops_it_from_the_total() {
+        let notch = staged(OverlayFamily::Notch(FilterLoop::Gyro), vec![0.5]);
+        let alone = chain_gain_db(&[&notch], Axis::Roll, FilterLoop::Gyro, 1).unwrap();
+
+        let lowpass = staged(OverlayFamily::Lowpass(FilterLoop::Gyro), vec![0.5]);
+        let both = chain_gain_db(&[&notch, &lowpass], Axis::Roll, FilterLoop::Gyro, 1).unwrap();
+
+        assert!(both[0] < alone[0] - 2.9, "{both:?} against {alone:?}");
+        assert_eq!(chain_gain_db(&[], Axis::Roll, FilterLoop::Gyro, 1), None);
+    }
+
+    /// A D-term stage is in no gyro total: it never touched the signal this
+    /// plot draws, and the fill under the gyro chain must not include it.
+    #[test]
+    fn a_dterm_stage_is_no_part_of_the_gyro_chain() {
+        let dterm = staged(OverlayFamily::Lowpass(FilterLoop::Dterm), vec![0.5]);
+
+        assert_eq!(
+            chain_gain_db(&[&dterm], Axis::Roll, FilterLoop::Gyro, 1),
+            None
+        );
+        assert!(chain_gain_db(&[&dterm], Axis::Roll, FilterLoop::Dterm, 1).is_some());
+        assert!(shows(&[&dterm], FilterLoop::Dterm));
+        assert!(!shows(&[&dterm], FilterLoop::Gyro));
+
+        // And with no D-term family drawn there is no reference line to draw
+        // either — an unlabelled line at the raw peak was the old anchor, and
+        // it meant nothing.
+        let gyro = staged(OverlayFamily::Notch(FilterLoop::Gyro), vec![0.5]);
+        assert!(!shows(&[&gyro], FilterLoop::Dterm));
+    }
+
+    /// A gain array that does not fit the spectrum's bins cannot be multiplied
+    /// against it, and a total off by one bin is a curve drawn at the wrong
+    /// frequency.
+    #[test]
+    fn a_gain_that_does_not_fit_the_spectrum_is_left_out() {
+        let stale = staged(OverlayFamily::Notch(FilterLoop::Gyro), vec![0.5, 0.5]);
+
+        assert_eq!(
+            chain_gain_db(&[&stale], Axis::Roll, FilterLoop::Gyro, 3),
+            None
+        );
+    }
+
+    /// The fill is the region between the raw trace and the total, so both its
+    /// edges are the spectrum's own bins — no resampling, and no chance of the
+    /// two edges disagreeing about where a frequency is.
+    #[test]
+    fn the_fills_two_edges_are_the_spectrums_own_bins() {
+        let psd = psd();
+        let gain_db = vec![-6.0; psd.power_db.len()];
+
+        let (freq, raw, total) = chain_edges(&psd, &gain_db).expect("a chain to draw");
+        assert_eq!(freq.len(), raw.len());
+        assert_eq!(freq.len(), total.len());
+        assert_eq!(freq, &psd.freq_hz[..]);
+        for (i, &v) in total.iter().enumerate() {
+            assert!((v - (raw[i] - 6.0)).abs() < 1e-9);
+        }
+    }
+
+    /// A gyro stage hangs off the raw trace's own points, because it acted on
+    /// this signal; a D-term stage hangs off its own unity gain, because it did
+    /// not. The same 6 dB cut therefore lands in two different places.
+    #[test]
+    fn a_dterm_curve_is_drawn_independently_of_the_spectrum() {
+        let psd = psd();
+        let on_data = |f| hover::y_at(&psd.freq_hz, &psd.power_db, f);
+
+        // The raw trace falls 1 dB per 100 Hz, so an anchored curve follows it.
+        assert!((on_data(200.0).unwrap() - on_data(600.0).unwrap() - 4.0).abs() < 1e-9);
+
+        let anchor = 0.0;
+        let off_reference = |_| Some(anchor);
+        assert_eq!(off_reference(200.0), off_reference(600.0));
+    }
+
+    fn dwell(weights: Vec<f64>) -> Dwell {
+        Dwell {
+            freq_hz: (0..weights.len())
+                .map(|i| 100.0 + i as f64 * 10.0)
+                .collect(),
+            weight: weights,
+        }
+    }
+
+    /// A pinned stage is a spike and a roaming one a plateau — one scale
+    /// across the lane, so the two read differently instead of both filling it.
+    #[test]
+    fn the_lane_draws_a_pinned_stage_taller_than_a_roaming_one() {
+        let pinned = dwell(vec![1.0, 0.0, 0.0, 0.0]);
+        let roaming = dwell(vec![0.25; 4]);
+        let peak = 1.0;
+
+        let bars = |d: &Dwell| lane_bars(d, peak, 10.0);
+        let tallest = |d: &Dwell| {
+            bars(d)
+                .iter()
+                .map(|&(_, _, height)| height)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+
+        assert_eq!(bars(&pinned).len(), 1, "an unvisited bin draws nothing");
+        assert_eq!(bars(&roaming).len(), 4);
+        assert!(tallest(&pinned) > tallest(&roaming) * 3.0);
+
+        // The lane is a strip of the plot: nothing in it reaches past its own
+        // height, whatever the dwell did.
+        assert!(bars(&pinned).iter().all(|&(_, _, height)| height <= 10.0));
+    }
+
+    /// A log with no dynamic stage has no lane at all, rather than an empty
+    /// strip of pixels along the floor.
+    #[test]
+    fn a_log_without_a_dynamic_stage_draws_no_lane() {
+        let static_stage = staged(OverlayFamily::Notch(FilterLoop::Gyro), vec![0.5]);
+
+        assert!(static_stage.dwell.is_none());
+        assert_eq!(lane_bars(&dwell(vec![0.0, 0.0]), 1.0, 10.0).len(), 0);
+    }
+
+    /// The whole panel, drawn headlessly with every overlay on: the fill, both
+    /// chains, the stage curves, the harmonic recolours, the dwell lane and the
+    /// peaks. A drawing bug here is a panic — `FilledArea` asserts its two
+    /// edges are the same length, and every lane bar is sized off plot bounds
+    /// that only exist mid-frame.
+    #[test]
+    fn every_overlay_draws_over_a_real_analysis() {
+        let (fd, metadata) = super::super::test_flight::synthetic();
+        let analysis = crate::analysis::GyroNoiseAnalyzer::default().analyze(&fd, &metadata);
+        assert!(analysis.axis(Axis::Roll).is_some(), "the fixture analysed");
+        assert!(
+            OverlayFamily::ALL
+                .iter()
+                .all(|&family| analysis.overlays.iter().any(|o| o.family == family)),
+            "the fixture is missing a family: {:?}",
+            analysis
+                .overlays
+                .iter()
+                .map(|o| o.family)
+                .collect::<Vec<_>>()
+        );
+
+        let mut panel = Psd {
+            filtered_visible: PerAxis([true; 3]),
+            overlays: OverlayVisibility::all_on(),
+        };
+        let ctx = egui::Context::default();
+        // Twice: the first frame has no stored plot bounds, and the dwell lane
+        // is sized from the bounds the previous frame left behind.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| panel.show(ui, &analysis));
+            });
+        }
+    }
+
+    /// The defect the lane is painted in screen space for: as bar charts its
+    /// bars were plot items, so they joined the bounds the plot fits itself to
+    /// — and a strip pinned to the bottom of those bounds re-sank the floor by
+    /// the plot's own margin on every frame. The spectrum shrank a little each
+    /// time the pointer moved.
+    #[test]
+    fn the_plot_settles_instead_of_growing_every_frame() {
+        let (fd, metadata) = super::super::test_flight::synthetic();
+        let analysis = crate::analysis::GyroNoiseAnalyzer::default().analyze(&fd, &metadata);
+        let mut panel = Psd {
+            filtered_visible: PerAxis([true; 3]),
+            overlays: OverlayVisibility::all_on(),
+        };
+        let ctx = egui::Context::default();
+
+        let mut spans = Vec::new();
+        for _ in 0..6 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| panel.show(ui, &analysis));
+            });
+            let memory = egui_plot::PlotMemory::load(&ctx, Id::new(plot_id(Axis::Roll)))
+                .expect("the plot stored its bounds");
+            spans.push(memory.bounds().height());
+        }
+
+        let (settled, before) = (spans[5], spans[4]);
+        assert!(
+            (settled - before).abs() < 1e-6,
+            "the y range is still moving: {spans:?}"
+        );
     }
 
     /// A filter chain that leaves a peak louder than it found it says so,
