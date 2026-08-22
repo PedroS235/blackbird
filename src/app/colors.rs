@@ -97,6 +97,82 @@ pub(in crate::app) fn chain_color(palette: &Palette, loop_: FilterLoop) -> Color
     hue_color(palette, hue, BASE_SATURATION)
 }
 
+/// The heatmap's ramp, from the quietest bin to the loudest: the background
+/// itself, through ember and red and amber, burning out to the palette's ink.
+///
+/// The stops are fractions of the scale. Red sits past halfway rather than at
+/// it, so the bottom half of the map — which on a clean log is most of it —
+/// stays dark and the eye is drawn only to what is actually loud.
+const HEAT_STOPS: [f32; 5] = [0.0, 0.42, 0.62, 0.82, 1.0];
+
+/// How much of the ember stop — the one between the background and red — is
+/// red. Enough to read as "something is here", far enough from the red stop to
+/// leave the ramp a gradient rather than a step.
+const EMBER_MIX: f32 = 0.45;
+
+/// How far the stop past red is pushed toward the ink, on paper. Dark mode
+/// burns out through amber to white instead; both are "further from the page
+/// than red", which is the direction that has to hold in either theme.
+const DEEP_MIX: f32 = 0.6;
+
+/// How much red survives in the peak, on paper.
+const PEAK_TINT: f32 = 0.1;
+
+/// The colour for one heatmap cell, `t` running 0 at the noise floor to 1 at
+/// the map's loudest bin.
+///
+/// This is Betaflight's own tooling read back: nothing is the background, hot
+/// is red, and the loudest bins burn out to white. It replaced a
+/// blue-green-red rainbow, which has two defects a pilot pays for — a rainbow
+/// has no order, so which of green and blue is louder has to be looked up
+/// rather than seen, and its brightest point is the green *middle*, so a
+/// moderate bin shouts louder than a bad one.
+///
+/// Mirrored on paper: the floor is always the panel's own background, so an
+/// empty map reads as empty, and the peak is always the palette's ink. A black
+/// floor on a white panel would read as a hole rather than as silence, and the
+/// loudest bin has to be the one furthest from the background — which on paper
+/// is black, not white.
+pub(in crate::app) fn heat_color(palette: &Palette, t: f32) -> Color32 {
+    // Floor and peak are the palette's; the hues between them are the heat, and
+    // red sits in the middle of both themes because that is where every other
+    // blackbox tool puts it.
+    let ember = mix(palette.bg, palette.red, EMBER_MIX);
+    let ramp = match palette.is_dark {
+        // Ember, red, and then burning out through amber to white.
+        true => [palette.bg, ember, palette.red, palette.amber, palette.text],
+        // On paper the hot end has to go the other way: pale red, red, then
+        // deeper red into the ink. Amber over white is a highlighter, and a
+        // white peak would be invisible.
+        false => [
+            palette.bg,
+            ember,
+            palette.red,
+            mix(palette.red, palette.text, DEEP_MIX),
+            // Not the ink itself: a red-tinted black keeps the hottest bins
+            // reading as heat rather than as a printer's smudge.
+            mix(palette.text, palette.red, PEAK_TINT),
+        ],
+    };
+
+    let t = t.clamp(0.0, 1.0);
+    let i = HEAT_STOPS
+        .iter()
+        .rposition(|&stop| t >= stop)
+        .unwrap_or(0)
+        .min(HEAT_STOPS.len() - 2);
+    let (from, to) = (HEAT_STOPS[i], HEAT_STOPS[i + 1]);
+
+    mix(ramp[i], ramp[i + 1], (t - from) / (to - from))
+}
+
+/// Blended in linear light rather than in gamma, so a ramp through red does not
+/// darken in the middle of every step.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let (a, b) = (egui::Rgba::from(a), egui::Rgba::from(b));
+    Color32::from(a * (1.0 - t) + b * t)
+}
+
 /// One motor's colour, 0-based. Four hues, cycled past the fourth: a hex or an
 /// octo still draws, at the cost of two motors sharing a hue — four distinct
 /// hues that all clear the contrast floor is already most of the wheel, and
@@ -247,6 +323,69 @@ mod test {
                 let color = motor_color(&palette, motor);
                 assert_ne!(dimmed(color), color);
             }
+        }
+    }
+
+    /// Luminance, for the ramp tests: the heatmap's whole job is that louder
+    /// looks louder, which is a claim about brightness and not about hue.
+    fn luminance(c: Color32) -> f32 {
+        let channel = |v: u8| {
+            let v = v as f32 / 255.0;
+            match v <= 0.03928 {
+                true => v / 12.92,
+                false => ((v + 0.055) / 1.055).powf(2.4),
+            }
+        };
+        0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+    }
+
+    /// The property the rainbow ramp did not have: every step away from the
+    /// noise floor moves further from the background, so a pilot reads "louder"
+    /// without consulting a key. The rainbow's brightest point was its green
+    /// middle, which made a moderate bin shout louder than a bad one.
+    #[test]
+    fn the_heat_ramp_runs_one_way_from_the_floor_to_the_peak() {
+        for palette in palettes() {
+            let floor = luminance(heat_color(&palette, 0.0));
+            let steps: Vec<f32> = (0..=20)
+                .map(|i| luminance(heat_color(&palette, i as f32 / 20.0)))
+                .collect();
+
+            for pair in steps.windows(2) {
+                let (a, b) = ((pair[0] - floor).abs(), (pair[1] - floor).abs());
+                assert!(
+                    b + 1e-4 >= a,
+                    "the ramp doubles back (dark: {}): {steps:?}",
+                    palette.is_dark
+                );
+            }
+        }
+    }
+
+    /// The floor is the panel's own background, so an empty map reads as empty
+    /// — and the peak is the palette's ink, which on paper is black. A black
+    /// floor on a white panel would be a hole rather than silence.
+    #[test]
+    fn the_ramp_starts_at_the_background_and_ends_far_from_it() {
+        for palette in palettes() {
+            assert_eq!(heat_color(&palette, 0.0), palette.bg);
+            assert!(
+                contrast(heat_color(&palette, 1.0), palette.bg) > MIN_CONTRAST * 2.0,
+                "the loudest bin barely stands out (dark: {})",
+                palette.is_dark
+            );
+        }
+    }
+
+    /// Hot is red, in both themes: it is what every other blackbox tool draws,
+    /// and the pilot arrives already reading it that way.
+    #[test]
+    fn the_middle_of_the_ramp_is_red() {
+        for palette in palettes() {
+            let mid = heat_color(&palette, 0.55);
+
+            assert!(mid.r() > mid.g() + 30, "{mid:?}");
+            assert!(mid.r() > mid.b() + 30, "{mid:?}");
         }
     }
 

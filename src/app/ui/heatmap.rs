@@ -1,6 +1,7 @@
 use egui::{Color32, ColorImage, TextureOptions, Vec2, Vec2b};
 use egui_plot::{Line, LineStyle, Plot, PlotImage, PlotPoint, PlotPoints};
 
+use crate::app::colors;
 use crate::signal::fft::BinnedSpectrum;
 use crate::signal::timeseries::windowed_downsample;
 
@@ -104,6 +105,10 @@ impl Heatmap<'_> {
             return;
         }
 
+        // Read per frame, like every other colour: the resolved light/dark
+        // state changes at any time, and the texture is rebuilt each frame
+        // anyway.
+        let palette = colors::palette(ui.ctx());
         let db_range = (0.0 - self.floor_db).max(f64::MIN_POSITIVE);
         let x_is_freq = self.orientation == HeatmapOrientation::VsThrottle;
         let (img_w, img_h) = if x_is_freq {
@@ -126,7 +131,7 @@ impl Heatmap<'_> {
                     (bin, freq_count - 1 - freq_idx)
                 };
                 pixels[pixel_row * img_w + col] =
-                    heat_color(((v - self.floor_db) / db_range) as f32);
+                    colors::heat_color(&palette, ((v - self.floor_db) / db_range) as f32);
             }
         }
         let texture = ui.ctx().load_texture(
@@ -258,18 +263,6 @@ fn drawable_runs(points: &[[f64; 2]], freq_min: f64, freq_max: f64) -> Vec<&[[f6
         .split(|&[_, v]| !(v > 0.0 && (freq_min..=freq_max).contains(&v)))
         .filter(|run| !run.is_empty())
         .collect()
-}
-
-fn heat_color(t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let (r, g, b) = if t < 0.5 {
-        let s = t * 2.0;
-        (0.0, s, 1.0 - s)
-    } else {
-        let s = (t - 0.5) * 2.0;
-        (s, 1.0 - s, 0.0)
-    };
-    Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 #[cfg(test)]

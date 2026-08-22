@@ -96,6 +96,7 @@ src/
         ├── timeseries/      ← gyro, power/battery, RSSI
         ├── filter_analysis/ ← PSD, Vs Reference, Spectrogram
         │   └── filter_marks.rs ← the same filters, on a map's own two axes
+        │       (the heat ramp both maps colour their cells with is in `colors.rs`)
         └── pid_analysis/    ← step response, gyro vs setpoint
 ```
 
@@ -692,6 +693,8 @@ _(none yet — project is in initial setup)_
 | Harmonic bands are a percentile, not an extent | On any real freestyle log the full min..max runs idle to full song, so three orders of it overlap into a wash that covers most of the spectrum. Every peak lands inside one, so every peak looks motor-explained and the overlay says nothing |
 | Spectrogram harmonics are built per frame, not stored | The panel already holds the flight data, and the dynamic notch trace set the precedent. The series borrows eRPM as logged and carries a `scale` applied after decimation — min-max decimation commutes with a positive scale, so nothing is copied per frame |
 | Raw and filtered PSDs share the raw peak as their dB reference | Each normalised to its own peak is two scales on one plot, and the quieter curve is lifted by whatever the filters removed at the loudest bin — a hover log drew filtered 10 dB above raw on pitch. Roll and throttle-ramp logs hid it: their loudest bin survives filtering, so the two references happened to agree |
+| The heatmaps run one sequential ramp: background → ember → red → out to the palette's far end | What every other blackbox tool draws, so the pilot arrives already reading it. The blue-green-red rainbow it replaced had two defects they paid for: a rainbow has no order, so which of green and blue is louder had to be looked up rather than seen, and its brightest point was the green *middle*, which made a moderate bin shout louder than a bad one |
+| The heat ramp's floor is the panel's own background, and its peak is mirrored per theme | An empty map then reads as empty rather than as a black slab, and the loudest bin is always the colour furthest from the page — white in dark mode, a red-tinted near-black on paper. A fixed black-to-white ramp is a hole in a light theme |
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
 | The harmonic mark's *hue and style together* live in `ui/harmonic_key.rs`, not `colors.rs` | `colors.rs` stays the palette — which hue is motor 3, in this theme. But a harmonic mark's identity is a hue *and* a line style, and a line style is not a colour: splitting the pair across two modules is exactly how the PSD's spans and the spectrogram's curves would come to disagree. `harmonic_key` asks `colors` for the hue and owns nothing else about the palette |
 | One `tracing` subscriber, `RUST_LOG`-overridable, crate-only by default | A bug report is a paste of this output. Dependencies logging per frame bury the parse and analysis lines it exists to show, and a pilot can still widen it without a rebuild |
