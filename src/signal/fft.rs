@@ -6,7 +6,8 @@ use rustfft::{Fft, FftPlanner, num_complex::Complex};
 #[derive(Debug, Clone)]
 pub struct Psd {
     pub freq_hz: Arc<[f64]>,
-    /// dB relative to the peak bin (peak = 0dB).
+    /// dB relative to a reference level — its own peak (so peak = 0 dB)
+    /// unless it was normalised against another pass's.
     pub power_db: Vec<f64>,
 }
 
@@ -274,9 +275,23 @@ pub struct SpectralView {
 
 impl SpectralView {
     pub fn psd(&self) -> Psd {
+        self.psd_relative_to(self.peak_db())
+    }
+
+    /// dB of this pass's loudest bin. Hand it to another pass's
+    /// `psd_relative_to` to put both curves on one scale.
+    pub fn peak_db(&self) -> f64 {
+        peak_db(&self.power)
+    }
+
+    /// The same PSD in dB against a level from somewhere else. Two signals
+    /// drawn on one plot — a gyro before and after its filters — have to share
+    /// a reference: normalising each to its own peak shifts the quieter one up
+    /// by whatever was taken off the loudest bin.
+    pub fn psd_relative_to(&self, reference_db: f64) -> Psd {
         Psd {
             freq_hz: self.freq_hz.clone(),
-            power_db: to_relative_db(&self.power, peak_db(&self.power)),
+            power_db: to_relative_db(&self.power, reference_db),
         }
     }
 
