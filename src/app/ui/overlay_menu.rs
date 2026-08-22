@@ -11,6 +11,16 @@ use egui::{RichText, Ui};
 
 use crate::analysis::{FilterLoop, OverlayFamily};
 
+/// What the panel does with an overlay, and so what its hover has to say. The
+/// PSD draws gain against the spectrum; a heatmap draws the same filters as
+/// frequencies on its own two axes, and a hover promising a fill under the raw
+/// trace would be describing a panel the pilot is not looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum Drawn {
+    OnSpectrum,
+    OnMap,
+}
+
 /// Row order is `OverlayFamily::ALL`'s order, and a family's position in it is
 /// that family's visibility flag — so a family the analysis can produce always
 /// has a toggle, and no two families can share one.
@@ -29,26 +39,37 @@ fn title(family: OverlayFamily) -> String {
 
 /// What the toggle draws, for the hover — the row has no space to say it and a
 /// pilot should not have to turn one on to find out.
-fn description(family: OverlayFamily) -> &'static str {
-    match family {
-        OverlayFamily::Harmonics => {
+fn description(family: OverlayFamily, drawn: Drawn) -> &'static str {
+    match (family, drawn) {
+        (OverlayFamily::Harmonics, _) => {
             "One mark per motor per harmonic order — hue is the motor, and solid, dashed and \
              dotted are the fundamental and its two multiples. On the PSD, the frequencies each \
-             motor spent the flight at; on the spectrogram, each motor's frequency over time."
+             motor spent the flight at; on the spectrogram, each motor's frequency over time; on \
+             the throttle map, the frequency it ran at against the stick."
         }
-        OverlayFamily::DynNotch => {
+        (OverlayFamily::DynNotch, Drawn::OnSpectrum) => {
             "Where the dynamic notch was allowed to work, along the plot floor, and — where the \
              log was flown in FFT_FREQ — what it actually took off, averaged over the centres its \
              tracker chose, with the time it spent at each drawn in the same lane."
         }
-        OverlayFamily::Notch(l) => match l {
-            FilterLoop::Gyro => GYRO_STAGE,
-            FilterLoop::Dterm => DTERM_STAGE,
-        },
-        OverlayFamily::Lowpass(l) => match l {
-            FilterLoop::Gyro => GYRO_STAGE,
-            FilterLoop::Dterm => DTERM_STAGE,
-        },
+        (OverlayFamily::DynNotch, Drawn::OnMap) => {
+            "The two ends of the range the notch was allowed, dashed — and where the log was \
+             flown in FFT_FREQ, the centre its tracker actually chose, so a tracker sitting off \
+             the noise band it is meant to be following is visible against that band."
+        }
+        (OverlayFamily::Notch(FilterLoop::Gyro), Drawn::OnSpectrum)
+        | (OverlayFamily::Lowpass(FilterLoop::Gyro), Drawn::OnSpectrum) => GYRO_STAGE,
+        (OverlayFamily::Notch(FilterLoop::Dterm), Drawn::OnSpectrum)
+        | (OverlayFamily::Lowpass(FilterLoop::Dterm), Drawn::OnSpectrum) => DTERM_STAGE,
+        (OverlayFamily::Notch(_), Drawn::OnMap) => {
+            "Each notch at the frequency it nulls, across the whole map — a static stage moves \
+             with neither the stick nor the clock."
+        }
+        (OverlayFamily::Lowpass(_), Drawn::OnMap) => {
+            "Each lowpass at its corner. A stage the throttle drives is drawn as the curve it \
+             really followed — Betaflight's own cutoff curve against the stick — which is the one \
+             thing the spectrum can only ever show the average of."
+        }
     }
 }
 
@@ -80,11 +101,11 @@ fn unavailable_reason(family: OverlayFamily) -> &'static str {
             "This log has no eRPM. Motor harmonics are computed from the RPM the ESCs report \
              back, which needs bidirectional DShot (`set dshot_bidir = ON`)."
         }
-        OverlayFamily::DynNotch => {
-            "Either no dynamic notch was configured on this flight, or — where the panel draws \
-             the tracker's own centre frequency — the log was not flown in debug mode FFT_FREQ \
-             (`set debug_mode = FFT_FREQ`)."
-        }
+        // Its configured bounds are drawable from the header alone, so the
+        // switch now greys out only when there is no notch at all. A log
+        // without FFT_FREQ still gets the bounds, and the hover says what the
+        // debug mode would add.
+        OverlayFamily::DynNotch => "No dynamic notch was configured on this flight.",
         OverlayFamily::Notch(_) => "No static notch was enabled on this flight.",
         OverlayFamily::Lowpass(_) => "No lowpass stage was configured on this flight.",
     }
@@ -153,6 +174,7 @@ pub(in crate::app) fn show(
     ui: &mut Ui,
     visibility: &mut OverlayVisibility,
     families: &[OverlayFamily],
+    drawn: Drawn,
     available: impl Fn(OverlayFamily) -> bool,
     has_peaks: Option<bool>,
 ) {
@@ -184,7 +206,7 @@ pub(in crate::app) fn show(
                 &title(family),
                 available(family),
                 |on| match on {
-                    true => description(family).to_string(),
+                    true => description(family, drawn).to_string(),
                     false => unavailable_reason(family).to_string(),
                 },
             );
@@ -265,10 +287,14 @@ mod test {
         for family in MENU_ORDER {
             let title = title(family);
             assert!(title.len() <= 14, "{title:?} is too long for the row");
-            assert!(
-                !description(family).is_empty(),
-                "{title:?} explains nothing"
-            );
+            // Both panels' hovers: a family listed on a map has to say what a
+            // map draws, not what the PSD draws.
+            for drawn in [Drawn::OnSpectrum, Drawn::OnMap] {
+                assert!(
+                    !description(family, drawn).is_empty(),
+                    "{title:?} explains nothing on {drawn:?}"
+                );
+            }
             assert!(!unavailable_reason(family).is_empty());
         }
 

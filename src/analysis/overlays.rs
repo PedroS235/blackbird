@@ -129,6 +129,30 @@ impl Dwell {
     }
 }
 
+/// How the firmware moved a stage's setting during the flight.
+///
+/// What a panel with a throttle or a time axis needs in order to draw the
+/// setting *as a function of that axis*, rather than as the one frequency the
+/// dwell-weighted average collapses it to. On a throttle-vs-frequency map a
+/// dynamic cutoff is not a smear — it is a curve, and an exact one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Driven {
+    /// A lowpass whose cutoff follows throttle, through Betaflight's own
+    /// `dynLpfCutoffFreq` curve.
+    Throttle(LowpassConfig),
+}
+
+impl Driven {
+    /// The setting this stage ran at, for a throttle as the log records it —
+    /// on the stick scale, not as a fraction. The conversion lives here so no
+    /// panel has to know what scale `rcCommand[3]` is on.
+    pub fn setting_at(&self, raw_throttle: f64) -> f64 {
+        match self {
+            Self::Throttle(lpf) => lpf.cutoff_at(throttle_fraction(raw_throttle) as f32) as f64,
+        }
+    }
+}
+
 /// A value an overlay carries once for the whole log, or once per axis where
 /// the firmware logs it per axis — the dynamic notch's tracked centre.
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +214,11 @@ pub struct FilterOverlay {
     pub gain: Option<ByAxis<Vec<f64>>>,
     /// Where a stage that moved spent its time. `None` for a static one.
     pub dwell: Option<ByAxis<Dwell>>,
+    /// What moved it, for the panels whose axes can show that. `None` for a
+    /// static stage, and for one whose movement the firmware chose rather than
+    /// a stick — the dynamic notch tracks noise, not throttle, so it is read
+    /// back from the log rather than derived from a curve.
+    pub driven: Option<Driven>,
 }
 
 /// How many bins the traced centre is reduced to before the response is
@@ -212,6 +241,12 @@ const BAND_PERCENTILES: (f64, f64) = (0.05, 0.95);
 /// a fraction.
 const THROTTLE_MIN: f64 = 1000.0;
 const THROTTLE_SPAN: f64 = 1000.0;
+
+/// One conversion from the logged stick value to the 0..=1 the firmware's own
+/// curves take.
+fn throttle_fraction(raw: f64) -> f64 {
+    ((raw - THROTTLE_MIN) / THROTTLE_SPAN).clamp(0.0, 1.0)
+}
 
 /// The two things every stage's geometry is measured against: the rate the
 /// filters ran at, and the spectrum's own frequency bins, which the chain
@@ -299,6 +334,7 @@ fn harmonics(fd: &Trimmed<'_>, metadata: &Metadata) -> Option<FilterOverlay> {
         shape: OverlayShape::Harmonics(bands),
         gain: None,
         dwell: None,
+        driven: None,
     })
 }
 
@@ -355,6 +391,7 @@ fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata, grid: &Grid<'_>) -> Vec<Filt
         shape: OverlayShape::Allowed { low_hz, high_hz },
         gain: None,
         dwell: None,
+        driven: None,
     }];
 
     if metadata.logs_dyn_notch_trace() {
@@ -394,6 +431,9 @@ fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata, grid: &Grid<'_>) -> Vec<Filt
                     Some(grid.gain(&dwells[axis].as_ref()?.stages(notch_at)))
                 })))),
                 dwell: Some(ByAxis::PerAxis(dwells)),
+                // Its centre followed the noise, not the stick: there is no
+                // curve to evaluate, only the trace the firmware logged.
+                driven: None,
             });
         }
     }
@@ -446,6 +486,7 @@ fn notches(configs: &[NotchConfig], loop_: FilterLoop, grid: &Grid<'_>) -> Vec<F
                 shape,
                 gain: stage.map(|stage| ByAxis::Shared(grid.stage_gain(stage))),
                 dwell: None,
+                driven: None,
             }
         })
         .collect()
@@ -485,6 +526,7 @@ fn lowpasses(cfg: &FilterConfig, throttle: Option<&[f64]>, grid: &Grid<'_>) -> V
                 shape: drawn.shape,
                 gain: drawn.settings.map(|s| ByAxis::Shared(grid.gain(&s))),
                 dwell: drawn.dwell.map(ByAxis::Shared),
+                driven: drawn.driven,
             });
         }
     };
@@ -531,6 +573,10 @@ struct Lowpass {
     suffix: String,
     settings: Option<Vec<(Stage, f64)>>,
     dwell: Option<Dwell>,
+    /// Set for a dynamic stage whatever the log carried: the curve is the
+    /// firmware's, so a panel with a throttle axis can draw it even where no
+    /// throttle was logged to weight an average with.
+    driven: Option<Driven>,
 }
 
 fn static_lowpass(
@@ -547,6 +593,7 @@ fn static_lowpass(
         suffix: String::new(),
         settings: Some(vec![(stage, 1.0)]),
         dwell: None,
+        driven: None,
     })
 }
 
@@ -584,6 +631,7 @@ fn lowpass_shape(
             suffix: format!(" (dyn, {}, config)", range_hz(min, max)),
             settings: None,
             dwell: None,
+            driven: Some(Driven::Throttle(lpf.clone())),
         });
     };
 
@@ -594,6 +642,7 @@ fn lowpass_shape(
         suffix: format!(" (dyn, {})", range_hz(low, high)),
         settings: Some(settings),
         dwell: Some(dwell),
+        driven: Some(Driven::Throttle(lpf.clone())),
     })
 }
 
@@ -608,10 +657,7 @@ fn range_hz(low: f64, high: f64) -> String {
 fn cutoffs(lpf: &LowpassConfig, throttle: &[f64]) -> Vec<f64> {
     throttle
         .iter()
-        .map(|&raw| {
-            let fraction = ((raw - THROTTLE_MIN) / THROTTLE_SPAN).clamp(0.0, 1.0);
-            lpf.cutoff_at(fraction as f32) as f64
-        })
+        .map(|&raw| lpf.cutoff_at(throttle_fraction(raw) as f32) as f64)
         .collect()
 }
 

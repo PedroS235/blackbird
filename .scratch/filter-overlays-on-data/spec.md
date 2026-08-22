@@ -148,11 +148,11 @@ than the current panel's, which is to draw no total at all.
 
 ## Out of scope
 
-- **The Spectrogram and Vs Reference.** The Spectrogram's axes already express
-  dynamics natively and it already draws the traced centre. Vs Reference is
-  throttle against frequency, where a dynamic LPF overlay would be a genuinely
-  new and correct thing — cutoff *is* a function of throttle on those axes —
-  but that is a feature of its own, not this fix.
+- ~~**The Spectrogram and Vs Reference.**~~ Done as a follow-up in the same
+  branch: both maps now draw every family on their own two axes, with a stage
+  the throttle drove as the firmware's own curve rather than its average — the
+  "genuinely new and correct thing" this section deferred. See
+  `tabs::filter_analysis::filter_marks`.
 - **Marking where the predicted total disagrees with the measured filtered
   PSD.** It is the real diagnosis and it is deliberately deferred: the model
   ignores stage ordering and cascade interaction, and `gyroADC` has been

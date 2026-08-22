@@ -94,7 +94,8 @@ src/
     │   └── timeseries_plot.rs
     └── tabs/
         ├── timeseries/      ← gyro, power/battery, RSSI
-        ├── filter_analysis/ ← PSD, Frequency, Vs Reference, Spectrogram
+        ├── filter_analysis/ ← PSD, Vs Reference, Spectrogram
+        │   └── filter_marks.rs ← the same filters, on a map's own two axes
         └── pid_analysis/    ← step response, gyro vs setpoint
 ```
 
@@ -351,6 +352,27 @@ load, and storing it puts the feature behind the loader integration seam.
   frequency still draws a segment, and skipped where the band falls off the end
   of the spectrum. No in-plot labels: a legend row above the plots keys them
   while the family is on
+- **The two maps draw the same filters on their own two axes** (`tabs::
+  filter_analysis::filter_marks`, one builder for both). A map's axes are
+  frequency and either throttle or time, so what it can say is *where* a stage
+  sat, never how much it took: a static stage is one frequency across the whole
+  map, a notch read at its null and a lowpass at its corner. Marks are built in
+  `(bin, frequency)` and the widget places them, so nothing that builds one
+  knows which map it lands on. Solid is what a stage did, dashed is what it was
+  only *allowed* to do — the dynamic notch's bounds, and a dynamic LPF with no
+  throttle to place a curve with
+- **A stage the throttle drove is an exact curve on those axes**, and this is
+  the one thing no spectrum can draw: `dynLpfCutoffFreq` is a function of the
+  stick, so on Vs Reference it is the curve itself, and on the Spectrogram it is
+  that curve composed with the throttle the pilot was holding at each moment.
+  `FilterOverlay::driven` carries the firmware's curve for exactly this; the
+  dynamic notch has none, because it tracked noise rather than the stick and is
+  read back from the log instead
+- Vs Reference bins the two log-shaped families — each motor's harmonics and the
+  tracker's own centre — into the same throttle bins the map itself uses: a bin
+  the pilot never held is left out rather than interpolated across, for the same
+  reason that row of the heatmap is blank. The Spectrogram keeps them as logged
+  channels, decimated per frame against the visible window
 - The Spectrogram draws the same identities as **curves of frequency against
   time** — the PIDToolbox view. Built per frame from `eRPM` rather than stored:
   the panel already holds the flight data, and the series borrows the samples
@@ -660,6 +682,9 @@ _(none yet — project is in initial setup)_
 | The dwell histogram is kept and drawn in a floor lane | It was computed for every dynamic stage and thrown away, and it is the only thing that separates a notch pinned on one frequency from one roaming across a range — a distinction the weighted average exactly divides out. Time is a third variable and both axes are spent, so it gets its own strip; alpha on the curve would say "we are unsure", which is a different and wrong claim |
 | `OverlayShape::Band` dies: bounds move to the lane, the dynamic LPF gets an envelope | A span says "everything in here is gone", the precise misread the response curves were introduced to kill. Bounds are the same kind of claim as dwell — where the filter was *allowed* to be — so they belong in the lane that means that; two rolloffs at the configured extremes say "somewhere between these" in the plot's own language |
 | Two filter hues, one per loop, not one per stage | Which stage a curve is, is derivable from its corner and its order. Which loop it belongs to is not, and it is the one that changes the CLI line the pilot types |
+| One mark builder for both maps, in `(bin, frequency)` | The throttle map and the spectrogram differ by exactly one axis swap. Two builders would be two rules about what a notch is read at, and they would drift |
+| A map draws a dynamic stage as the firmware's own curve, not its average | On axes where the setting *is* a function of the stick, the average is a loss of information the panel does not have to take. It is also the only view in the app that can show a cutoff sitting under the noise only at low throttle |
+| Both maps list every family; the PSD's hover text does not follow them there | A greyed toggle blames the log, so a family a panel can draw has to be listed — and a hover promising a fill under the raw trace would be describing a different panel, so the menu takes what the panel does with an overlay (`Drawn`) and says that instead |
 | Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
 | Overlays default to off, behind an inline toggle row | The panel opens as a clean spectrum, so every mark over the curve is one the pilot asked for. The toggles are laid out inline rather than in a dropdown: a button that opens a menu announces nothing, and with every family off there is no mark on the plot to hint that more exists. One wrapped row is the whole cost |
 | Harmonic identity is hue-per-motor plus style-per-order | Order is derivable — the second harmonic is at twice the first and the pilot can see that. Which motor is loud is not derivable and is the diagnosis. Colouring by order spent the only distinguishing channel on the less useful of the two facts, and left four motors indistinguishable |

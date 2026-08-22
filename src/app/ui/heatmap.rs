@@ -27,6 +27,31 @@ pub struct OverlaySeries<'a> {
     pub style: LineStyle,
 }
 
+/// A filter's geometry in the map's own two axes.
+///
+/// The map bins by throttle or by time, so a filter is either one frequency all
+/// the way across it — a static stage does not move with either — or a
+/// frequency per bin, which is what a dynamic stage actually was. A dynamic
+/// cutoff against throttle is not an average: `dynLpfCutoffFreq` is a function
+/// of the stick, so on those axes it is an exact curve.
+#[derive(Clone, PartialEq)]
+pub enum Mark {
+    /// One frequency, across every bin.
+    Level(f64),
+    /// `(bin, freq_hz)` pairs, in the bin's own units — throttle as the log
+    /// records it, or seconds.
+    Curve(Vec<[f64; 2]>),
+}
+
+/// One drawn filter mark, with the identity the panel gave it.
+#[derive(Clone)]
+pub struct OverlayMark {
+    pub name: String,
+    pub mark: Mark,
+    pub color: Color32,
+    pub style: LineStyle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeatmapOrientation {
     /// Frequency on x, bin (e.g. throttle) on y.
@@ -36,6 +61,16 @@ pub enum HeatmapOrientation {
 }
 
 impl HeatmapOrientation {
+    /// A `(bin, frequency)` pair in the plot's own coordinates. The two maps
+    /// differ by exactly this swap, so nothing that builds a mark has to know
+    /// which map it is drawing on.
+    fn place(self, bin: f64, freq_hz: f64) -> [f64; 2] {
+        match self {
+            Self::VsThrottle => [freq_hz, bin],
+            Self::VsTime => [bin, freq_hz],
+        }
+    }
+
     fn axis_labels(self) -> (&'static str, &'static str) {
         match self {
             Self::VsThrottle => ("Hz", "throttle"),
@@ -54,6 +89,10 @@ pub struct Heatmap<'a> {
     pub height: f32,
     pub floor_db: f64,
     pub overlays: Vec<OverlaySeries<'a>>,
+    /// Filter geometry, in the map's own axes. Separate from `overlays`: those
+    /// are logged channels, decimated per frame out of a hundred thousand
+    /// samples, while a mark is a handful of points computed from the header.
+    pub marks: Vec<OverlayMark>,
 }
 
 impl Heatmap<'_> {
@@ -121,6 +160,8 @@ impl Heatmap<'_> {
         let (x_label, y_label) = self.orientation.axis_labels();
         let bucket_count = (ui.available_width().max(1.0) as usize).max(1);
         let overlays = &self.overlays;
+        let marks = &self.marks;
+        let orientation = self.orientation;
 
         Plot::new(self.id.as_str())
             .height(self.height)
@@ -131,6 +172,32 @@ impl Heatmap<'_> {
             .y_axis_label(y_label)
             .show(ui, |plot_ui| {
                 plot_ui.image(PlotImage::new(self.id.as_str(), &texture, center, size));
+
+                for mark in marks {
+                    // Clipped to the map's frequency range like every other
+                    // curve: the image sets the plot's bounds, and a lowpass
+                    // corner above Nyquist would stretch them until the
+                    // heatmap is a stripe.
+                    let points = mark_points(&mark.mark, bin_min, bin_max);
+                    for (i, run) in drawable_runs(&points, freq_min, freq_max)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let name = match i {
+                            0 => mark.name.clone(),
+                            _ => String::new(),
+                        };
+                        let placed: Vec<[f64; 2]> = run
+                            .iter()
+                            .map(|&[bin, freq]| orientation.place(bin, freq))
+                            .collect();
+                        plot_ui.line(
+                            Line::new(name, PlotPoints::from(placed))
+                                .color(mark.color)
+                                .style(mark.style),
+                        );
+                    }
+                }
 
                 for overlay in overlays {
                     let bounds = plot_ui.plot_bounds();
@@ -167,6 +234,15 @@ impl Heatmap<'_> {
                     }
                 }
             });
+    }
+}
+
+/// A mark as `(bin, freq_hz)` pairs — a level becoming the two ends of the
+/// map, so both kinds clip and draw through one path.
+fn mark_points(mark: &Mark, bin_min: f64, bin_max: f64) -> Vec<[f64; 2]> {
+    match mark {
+        Mark::Level(hz) => vec![[bin_min, *hz], [bin_max, *hz]],
+        Mark::Curve(points) => points.clone(),
     }
 }
 
@@ -228,6 +304,27 @@ mod test {
         let runs = drawable_runs(&points, 1.0, 500.0);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0], &points[1..2]);
+    }
+
+    /// The two maps differ by one swap, so a mark is built once in `(bin,
+    /// frequency)` and placed by the map it lands on.
+    #[test]
+    fn a_mark_is_placed_on_whichever_axis_the_map_bins_by() {
+        assert_eq!(
+            HeatmapOrientation::VsThrottle.place(1500.0, 300.0),
+            [300.0, 1500.0]
+        );
+        assert_eq!(HeatmapOrientation::VsTime.place(4.0, 300.0), [4.0, 300.0]);
+    }
+
+    /// A static stage does not move with throttle or with time, so its one
+    /// frequency runs the whole width of the map.
+    #[test]
+    fn a_level_spans_the_map_at_one_frequency() {
+        assert_eq!(
+            mark_points(&Mark::Level(300.0), 1000.0, 2000.0),
+            vec![[1000.0, 300.0], [2000.0, 300.0]]
+        );
     }
 
     /// A curve wholly inside the map is one unbroken line.

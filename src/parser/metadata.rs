@@ -37,7 +37,7 @@ impl FilterType {
 /// A lowpass stage that may run at a fixed cutoff or scale dynamically with
 /// throttle between `dyn_min_hz`..`dyn_max_hz` (Betaflight's dynamic gyro/dterm
 /// LPF1). `static_hz == 0.0` means the dynamic range is active.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LowpassConfig {
     pub static_hz: f32,
     pub dyn_min_hz: f32,

@@ -88,6 +88,7 @@ impl Psd {
             ui,
             &mut self.overlays,
             &OverlayFamily::ALL,
+            overlay_menu::Drawn::OnSpectrum,
             |family| analysis.overlays.iter().any(|o| o.family == family),
             Some(has_peaks),
         );
@@ -744,6 +745,7 @@ mod test {
             shape,
             gain: None,
             dwell: None,
+            driven: None,
         }
     }
 
@@ -1015,91 +1017,6 @@ mod test {
         assert_eq!(lane_bars(&dwell(vec![0.0, 0.0]), 1.0, 10.0).len(), 0);
     }
 
-    /// A synthetic flight with everything the overlays are built from: two
-    /// noisy axes pre- and post-filter, throttle for the dynamic lowpass,
-    /// eRPM for the harmonics, and a tracked notch centre in `debug[0]`.
-    fn flight() -> (crate::parser::FlightData, crate::parser::Metadata) {
-        use crate::parser::Channel;
-        use crate::parser::metadata::{
-            DynNotchConfig, FilterConfig, FilterType, LowpassConfig, NotchConfig,
-            StaticLowpassConfig,
-        };
-
-        const N: usize = 4096;
-        let at = |i: usize| i as f64 / 4000.0;
-        let noise = |i: usize| {
-            let t = at(i);
-            (t * 220.0 * std::f64::consts::TAU).sin() * 40.0
-                + (t * 640.0 * std::f64::consts::TAU).sin() * 12.0
-        };
-
-        let mut fd = crate::parser::FlightData::default()
-            .with_time((0..N as u64).map(|i| i * 250).collect())
-            .with_channel(
-                Channel::Throttle,
-                (0..N).map(|i| 1000.0 + at(i) * 800.0).collect(),
-            )
-            .with_channel(Channel::Rpm(0), vec![4200.0; N])
-            .with_channel(
-                Channel::Debug(0),
-                (0..N).map(|i| 200.0 + at(i) * 90.0).collect(),
-            );
-        for axis in Axis::ALL {
-            fd = fd
-                .with_channel(Channel::RawGyro(axis), (0..N).map(noise).collect())
-                .with_channel(
-                    Channel::Gyro(axis),
-                    (0..N).map(|i| noise(i) * 0.5).collect(),
-                )
-                .with_channel(
-                    Channel::Debug(axis.index()),
-                    (0..N).map(|i| 200.0 + at(i) * 90.0).collect(),
-                );
-        }
-
-        let metadata = crate::parser::Metadata {
-            looptime_us: Some(125),
-            debug_mode: "FFT_FREQ".to_string(),
-            filters: FilterConfig {
-                gyro_lpf1: Some(LowpassConfig {
-                    static_hz: 0.0,
-                    dyn_min_hz: 250.0,
-                    dyn_max_hz: 500.0,
-                    dyn_expo: 0.0,
-                    filter_type: FilterType::Pt1,
-                }),
-                gyro_lpf2: Some(StaticLowpassConfig {
-                    cutoff_hz: 500.0,
-                    filter_type: FilterType::Pt1,
-                }),
-                gyro_notches: vec![NotchConfig {
-                    center_hz: 300.0,
-                    cutoff_hz: 280.0,
-                }],
-                dterm_lpf1: Some(LowpassConfig {
-                    static_hz: 100.0,
-                    dyn_min_hz: 0.0,
-                    dyn_max_hz: 0.0,
-                    dyn_expo: 0.0,
-                    filter_type: FilterType::Pt2,
-                }),
-                dterm_notches: vec![NotchConfig {
-                    center_hz: 0.0,
-                    cutoff_hz: 0.0,
-                }],
-                dyn_notch: Some(DynNotchConfig {
-                    min_hz: 100.0,
-                    max_hz: 500.0,
-                    count: 2,
-                    q: 5.0,
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        (fd, metadata)
-    }
-
     /// The whole panel, drawn headlessly with every overlay on: the fill, both
     /// chains, the stage curves, the harmonic recolours, the dwell lane and the
     /// peaks. A drawing bug here is a panic — `FilledArea` asserts its two
@@ -1107,7 +1024,7 @@ mod test {
     /// that only exist mid-frame.
     #[test]
     fn every_overlay_draws_over_a_real_analysis() {
-        let (fd, metadata) = flight();
+        let (fd, metadata) = super::super::test_flight::synthetic();
         let analysis = crate::analysis::GyroNoiseAnalyzer::default().analyze(&fd, &metadata);
         assert!(analysis.axis(Axis::Roll).is_some(), "the fixture analysed");
         assert!(
@@ -1143,7 +1060,7 @@ mod test {
     /// time the pointer moved.
     #[test]
     fn the_plot_settles_instead_of_growing_every_frame() {
-        let (fd, metadata) = flight();
+        let (fd, metadata) = super::super::test_flight::synthetic();
         let analysis = crate::analysis::GyroNoiseAnalyzer::default().analyze(&fd, &metadata);
         let mut panel = Psd {
             filtered_visible: PerAxis([true; 3]),
