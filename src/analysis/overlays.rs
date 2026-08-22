@@ -40,6 +40,17 @@ pub enum OverlayFamily {
 }
 
 impl OverlayFamily {
+    /// Which chain a family belongs to, so a panel can cascade the visible
+    /// gyro stages without matching on each variant. The dynamic notch is a
+    /// gyro stage; the harmonics are not a filter at all.
+    pub const fn filter_loop(self) -> Option<FilterLoop> {
+        match self {
+            Self::Harmonics => None,
+            Self::DynNotch => Some(FilterLoop::Gyro),
+            Self::Notch(loop_) | Self::Lowpass(loop_) => Some(loop_),
+        }
+    }
+
     pub const ALL: [Self; 6] = [
         Self::Harmonics,
         Self::DynNotch,
@@ -69,15 +80,18 @@ pub struct HarmonicBand {
     pub filtered: bool,
 }
 
-/// Where a filter that moved actually sat, as time spent per setting. The
-/// intermediate a swept response is averaged over, not an output: as a picture
-/// it says where the filter was, and a pilot wants to know what it removed.
+/// Where a filter that moved actually sat, as time spent per setting.
+///
+/// The intermediate a swept response is averaged over — and kept, rather than
+/// dropped once the average is taken: a curve says what the filter removed,
+/// and a pilot also wants to know whether it was pinned on one frequency or
+/// roaming across a range, which the average has exactly divided out.
 #[derive(Debug, Clone, PartialEq)]
-struct Dwell {
+pub struct Dwell {
     /// Bin centres, Hz.
-    freq_hz: Vec<f64>,
+    pub freq_hz: Vec<f64>,
     /// Fraction of the analysed window spent in each bin, summing to 1.
-    weight: Vec<f64>,
+    pub weight: Vec<f64>,
 }
 
 impl Dwell {
@@ -90,6 +104,46 @@ impl Dwell {
             .map(|(&hz, &w)| (stage_at(hz), w))
             .collect()
     }
+
+    /// The setting this filter spent `q` of the window at or below. Weights are
+    /// time, so the rank is already time-weighted — the same rule the harmonic
+    /// bands are cut to.
+    fn percentile(&self, q: f64) -> Option<f64> {
+        let mut cumulative = 0.0;
+        self.freq_hz
+            .iter()
+            .zip(&self.weight)
+            .find(|&(_, &w)| {
+                cumulative += w;
+                cumulative >= q && w > 0.0
+            })
+            .map(|(&hz, _)| hz)
+    }
+
+    /// The range this filter really used, against the range it was allowed:
+    /// the configured min..max is what the firmware could have done, and on a
+    /// real flight it is most of the spectrum.
+    fn realised_range(&self) -> Option<(f64, f64)> {
+        let (low, high) = BAND_PERCENTILES;
+        Some((self.percentile(low)?, self.percentile(high)?))
+    }
+}
+
+/// A value an overlay carries once for the whole log, or once per axis where
+/// the firmware logs it per axis — the dynamic notch's tracked centre.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ByAxis<T> {
+    Shared(T),
+    PerAxis(PerAxis<Option<T>>),
+}
+
+impl<T> ByAxis<T> {
+    pub fn get(&self, axis: Axis) -> Option<&T> {
+        match self {
+            Self::Shared(value) => Some(value),
+            Self::PerAxis(per_axis) => per_axis[axis].as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,13 +151,23 @@ pub enum OverlayShape {
     /// A filter whose shape we cannot derive — a notch with no usable cutoff.
     /// Everything we can size draws its real response instead.
     Line { hz: f64 },
-    /// The range a filter is allowed to work in. Not what it removed — the
-    /// dynamic notch's configured bounds, and nothing else.
-    Band { low_hz: f64, high_hz: f64 },
+    /// Where a filter was *allowed* to work, with nothing logged to say where
+    /// it went: the dynamic notch's configured bounds. Drawn in the dwell lane
+    /// along the plot floor rather than over the spectrum — a span across the
+    /// curve reads as "everything in here is gone", which is the misread the
+    /// response curves exist to kill.
+    Allowed { low_hz: f64, high_hz: f64 },
     /// One band per motor per harmonic order.
     Harmonics(Vec<HarmonicBand>),
     /// What a filter took off, per frequency.
     Response(FilterResponse),
+    /// The two rolloffs a dynamic lowpass ran somewhere between, where the log
+    /// carried no throttle to weight the sweep with. Two real curves say
+    /// "somewhere between these" in the plot's own language.
+    Envelope {
+        low: FilterResponse,
+        high: FilterResponse,
+    },
     /// The same, where it had to be measured per axis — the dynamic notch,
     /// whose centre the firmware logs one of per axis.
     Traced(PerAxis<Option<FilterResponse>>),
@@ -115,6 +179,17 @@ pub struct FilterOverlay {
     pub label: String,
     pub family: OverlayFamily,
     pub shape: OverlayShape,
+    /// This stage's power gain on the spectrum's own frequency grid, so the
+    /// chain total is an elementwise product over the visible stages and the
+    /// fill's two edges share their x with the raw trace.
+    ///
+    /// `None` where there is no stage to model: the harmonic bands, a notch
+    /// with no usable Q, and a dynamic lowpass with no throttle to weight —
+    /// that last one has bounds but no expected gain, and a total must not
+    /// claim a cut nothing can weight.
+    pub gain: Option<ByAxis<Vec<f64>>>,
+    /// Where a stage that moved spent its time. `None` for a static one.
+    pub dwell: Option<ByAxis<Dwell>>,
 }
 
 /// How many bins the traced centre is reduced to before the response is
@@ -138,19 +213,51 @@ const BAND_PERCENTILES: (f64, f64) = (0.05, 0.95);
 const THROTTLE_MIN: f64 = 1000.0;
 const THROTTLE_SPAN: f64 = 1000.0;
 
+/// The two things every stage's geometry is measured against: the rate the
+/// filters ran at, and the spectrum's own frequency bins, which the chain
+/// total is re-multiplied over per frame.
+struct Grid<'a> {
+    /// The PID loop rate — a log written every second frame would otherwise
+    /// show every stage rolling off far earlier than it does.
+    fs: f64,
+    /// The PSD's bins. Evaluating a gain here cannot represent a null narrower
+    /// than a bin, which is correct rather than a compromise: the spectrum
+    /// cannot show attenuation finer than its own resolution either.
+    freq_hz: &'a [f64],
+}
+
+impl Grid<'_> {
+    /// One stage's expected power gain across the spectrum's bins, from the
+    /// settings it ran at — a static stage is one `(stage, 1.0)` pair.
+    fn gain(&self, settings: &[(Stage, f64)]) -> Vec<f64> {
+        filter_response::cascade(&[settings], self.freq_hz, self.fs)
+    }
+
+    fn stage_gain(&self, stage: Stage) -> Vec<f64> {
+        self.gain(&[(stage, 1.0)])
+    }
+}
+
 /// Every overlay this log can support, over the same window the spectra were
-/// measured on.
-pub(super) fn build(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay> {
+/// measured on. `spectrum_hz` is the PSD's frequency grid, shared by every
+/// axis, and the grid every stage's gain is precomputed on.
+pub(super) fn build(
+    fd: &Trimmed<'_>,
+    metadata: &Metadata,
+    spectrum_hz: &[f64],
+) -> Vec<FilterOverlay> {
     let cfg = &metadata.filters;
-    // The rate the filters ran at, not the rate the log was written at.
-    let fs = metadata.filter_rate_hz(fd.sample_rate_hz());
+    let grid = Grid {
+        fs: metadata.filter_rate_hz(fd.sample_rate_hz()),
+        freq_hz: spectrum_hz,
+    };
     let mut overlays = Vec::new();
 
     overlays.extend(harmonics(fd, metadata));
-    overlays.extend(dyn_notch(fd, metadata));
-    overlays.extend(notches(&cfg.gyro_notches, FilterLoop::Gyro, fs));
-    overlays.extend(notches(&cfg.dterm_notches, FilterLoop::Dterm, fs));
-    overlays.extend(lowpasses(cfg, fd.throttle(), fs));
+    overlays.extend(dyn_notch(fd, metadata, &grid));
+    overlays.extend(notches(&cfg.gyro_notches, FilterLoop::Gyro, &grid));
+    overlays.extend(notches(&cfg.dterm_notches, FilterLoop::Dterm, &grid));
+    overlays.extend(lowpasses(cfg, fd.throttle(), &grid));
     overlays
 }
 
@@ -184,10 +291,14 @@ fn harmonics(fd: &Trimmed<'_>, metadata: &Metadata) -> Option<FilterOverlay> {
         .flatten()
         .collect();
 
+    // No gain: the harmonics are noise the filters are aimed at, not a stage
+    // in the chain, so they take no part in its total.
     (!bands.is_empty()).then(|| FilterOverlay {
         label: "Motor harmonics".to_string(),
         family: OverlayFamily::Harmonics,
         shape: OverlayShape::Harmonics(bands),
+        gain: None,
+        dwell: None,
     })
 }
 
@@ -226,7 +337,7 @@ fn is_filtered(rpm_filter: Option<&RpmFilterConfig>, order: u32) -> bool {
 /// The configured range as a band, and — where the log was flown in
 /// `FFT_FREQ` — what the notch actually took off, from the centres the
 /// tracker chose.
-fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay> {
+fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata, grid: &Grid<'_>) -> Vec<FilterOverlay> {
     let Some(cfg) = &metadata.filters.dyn_notch else {
         return Vec::new();
     };
@@ -238,25 +349,32 @@ fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay> {
             n => format!("Dyn notch range (×{n})"),
         },
         family: OverlayFamily::DynNotch,
-        shape: OverlayShape::Band { low_hz, high_hz },
+        // Where it was allowed to be, and no more: with no trace there is
+        // nothing to say about where it went, so it draws in the floor lane
+        // that means exactly that.
+        shape: OverlayShape::Allowed { low_hz, high_hz },
+        gain: None,
+        dwell: None,
     }];
 
     if metadata.logs_dyn_notch_trace() {
-        let fs = metadata.filter_rate_hz(fd.sample_rate_hz());
+        let q = cfg.q as f64;
+        let notch_at = move |centre_hz| Stage::Notch { centre_hz, q };
+        let dwells = PerAxis(Axis::ALL.map(|axis| {
+            fd.debug_axis(axis)
+                .and_then(|s| dwell_histogram(s, low_hz, high_hz))
+        }));
+
         let traced = PerAxis(Axis::ALL.map(|axis| {
-            let dwell = fd
-                .debug_axis(axis)
-                .and_then(|s| dwell_histogram(s, low_hz, high_hz))?;
-            let q = cfg.q as f64;
             let pad = (high_hz / q).max(10.0);
             filter_response::weighted(
-                &dwell.stages(|centre_hz| Stage::Notch { centre_hz, q }),
+                &dwells[axis].as_ref()?.stages(notch_at),
                 // Past the configured bounds, out to where the skirts have
                 // recovered — a V cut off at a bound would look like a wall
                 // the filter does not have.
                 low_hz - pad,
                 high_hz + pad,
-                fs,
+                grid.fs,
             )
         }));
 
@@ -265,9 +383,17 @@ fn dyn_notch(fd: &Trimmed<'_>, metadata: &Metadata) -> Vec<FilterOverlay> {
                 // One notch, however many were configured: Betaflight logs one
                 // centre per axis, so the others cannot be drawn and this does
                 // not pretend they were.
+                //
+                // No realised range in the label either, unlike a dynamic
+                // lowpass: there are three of them, one per axis, and a single
+                // name cannot carry three. The dwell lane says it per axis.
                 label: "Dyn notch response (traced)".to_string(),
                 family: OverlayFamily::DynNotch,
                 shape: OverlayShape::Traced(traced),
+                gain: Some(ByAxis::PerAxis(PerAxis(Axis::ALL.map(|axis| {
+                    Some(grid.gain(&dwells[axis].as_ref()?.stages(notch_at)))
+                })))),
+                dwell: Some(ByAxis::PerAxis(dwells)),
             });
         }
     }
@@ -308,14 +434,19 @@ fn dwell_histogram(samples: &[f64], low_hz: f64, high_hz: f64) -> Option<Dwell> 
     })
 }
 
-fn notches(configs: &[NotchConfig], loop_: FilterLoop, sample_rate_hz: f64) -> Vec<FilterOverlay> {
+fn notches(configs: &[NotchConfig], loop_: FilterLoop, grid: &Grid<'_>) -> Vec<FilterOverlay> {
     configs
         .iter()
         .enumerate()
-        .map(|(i, notch)| FilterOverlay {
-            label: format!("{} notch {}", loop_.name(), i + 1),
-            family: OverlayFamily::Notch(loop_),
-            shape: notch_shape(notch, sample_rate_hz),
+        .map(|(i, notch)| {
+            let (shape, stage) = notch_shape(notch, grid.fs);
+            FilterOverlay {
+                label: format!("{} notch {}", loop_.name(), i + 1),
+                family: OverlayFamily::Notch(loop_),
+                shape,
+                gain: stage.map(|stage| ByAxis::Shared(grid.stage_gain(stage))),
+                dwell: None,
+            }
         })
         .collect()
 }
@@ -323,18 +454,20 @@ fn notches(configs: &[NotchConfig], loop_: FilterLoop, sample_rate_hz: f64) -> V
 /// Betaflight derives a notch's Q from its centre and cutoff
 /// (`filterGetNotchQ`), and the V it cuts follows from the two. A cutoff at or
 /// above the centre is not a notch this can size, and stays a bare line rather
-/// than a curve of invented depth.
-fn notch_shape(notch: &NotchConfig, sample_rate_hz: f64) -> OverlayShape {
+/// than a curve of invented depth — and a shape we cannot derive is a shape we
+/// cannot cascade either, so it carries no stage.
+fn notch_shape(notch: &NotchConfig, sample_rate_hz: f64) -> (OverlayShape, Option<Stage>) {
     let (centre_hz, cutoff) = (notch.center_hz as f64, notch.cutoff_hz as f64);
-    let line = OverlayShape::Line { hz: centre_hz };
+    let line = (OverlayShape::Line { hz: centre_hz }, None);
 
     let q = match cutoff > 0.0 && centre_hz > cutoff {
         true => centre_hz * cutoff / (centre_hz * centre_hz - cutoff * cutoff),
         false => return line,
     };
+    let stage = Stage::Notch { centre_hz, q };
 
-    match filter_response::of(Stage::Notch { centre_hz, q }, sample_rate_hz) {
-        Some(response) => OverlayShape::Response(response),
+    match filter_response::of(stage, sample_rate_hz) {
+        Some(response) => (OverlayShape::Response(response), Some(stage)),
         None => line,
     }
 }
@@ -342,14 +475,16 @@ fn notch_shape(notch: &NotchConfig, sample_rate_hz: f64) -> OverlayShape {
 /// Every lowpass stage, as the rolloff it is. A dynamic LPF1 is averaged over
 /// the cutoffs the throttle actually took it to, the same way the dynamic
 /// notch is averaged over the centres its tracker chose.
-fn lowpasses(cfg: &FilterConfig, throttle: Option<&[f64]>, fs: f64) -> Vec<FilterOverlay> {
+fn lowpasses(cfg: &FilterConfig, throttle: Option<&[f64]>, grid: &Grid<'_>) -> Vec<FilterOverlay> {
     let mut overlays = Vec::new();
-    let mut push = |label: &str, loop_: FilterLoop, shape: Option<OverlayShape>| {
-        if let Some(shape) = shape {
+    let mut push = |name: &str, loop_: FilterLoop, drawn: Option<Lowpass>| {
+        if let Some(drawn) = drawn {
             overlays.push(FilterOverlay {
-                label: label.to_string(),
+                label: format!("{name}{}", drawn.suffix),
                 family: OverlayFamily::Lowpass(loop_),
-                shape,
+                shape: drawn.shape,
+                gain: drawn.settings.map(|s| ByAxis::Shared(grid.gain(&s))),
+                dwell: drawn.dwell.map(ByAxis::Shared),
             });
         }
     };
@@ -358,46 +493,61 @@ fn lowpasses(cfg: &FilterConfig, throttle: Option<&[f64]>, fs: f64) -> Vec<Filte
         push(
             "Gyro LPF1",
             FilterLoop::Gyro,
-            lowpass_shape(lpf, throttle, fs),
+            lowpass_shape(lpf, throttle, grid),
         );
     }
     if let Some(lpf) = &cfg.gyro_lpf2 {
         push(
             "Gyro LPF2",
             FilterLoop::Gyro,
-            static_lowpass_shape(lpf.cutoff_hz as f64, lpf.filter_type, fs),
+            static_lowpass(lpf.cutoff_hz as f64, lpf.filter_type, grid.fs),
         );
     }
     if let Some(lpf) = &cfg.dterm_lpf1 {
         push(
             "D-term LPF1",
             FilterLoop::Dterm,
-            lowpass_shape(lpf, throttle, fs),
+            lowpass_shape(lpf, throttle, grid),
         );
     }
     if let Some(lpf) = &cfg.dterm_lpf2 {
         push(
             "D-term LPF2",
             FilterLoop::Dterm,
-            static_lowpass_shape(lpf.cutoff_hz as f64, lpf.filter_type, fs),
+            static_lowpass(lpf.cutoff_hz as f64, lpf.filter_type, grid.fs),
         );
     }
     overlays
 }
 
-fn static_lowpass_shape(
+/// One lowpass stage as it will be drawn: its shape, what its name has to
+/// carry beyond the stage's own, the settings its gain is cascaded from, and
+/// where it spent its time.
+struct Lowpass {
+    shape: OverlayShape,
+    /// `` for a static stage, `(dyn, 180–420 Hz)` for one that moved. A
+    /// dynamic stage labelled like a static one reads as one soft rolloff,
+    /// which is the one thing it is not.
+    suffix: String,
+    settings: Option<Vec<(Stage, f64)>>,
+    dwell: Option<Dwell>,
+}
+
+fn static_lowpass(
     cutoff_hz: f64,
     filter_type: crate::parser::metadata::FilterType,
     fs: f64,
-) -> Option<OverlayShape> {
-    filter_response::of(
-        Stage::Lowpass {
-            cutoff_hz,
-            filter_type,
-        },
-        fs,
-    )
-    .map(OverlayShape::Response)
+) -> Option<Lowpass> {
+    let stage = Stage::Lowpass {
+        cutoff_hz,
+        filter_type,
+    };
+    Some(Lowpass {
+        shape: OverlayShape::Response(filter_response::of(stage, fs)?),
+        suffix: String::new(),
+        settings: Some(vec![(stage, 1.0)]),
+        dwell: None,
+    })
 }
 
 /// A dynamic lowpass swept its corner all flight, so no one rolloff describes
@@ -407,29 +557,49 @@ fn static_lowpass_shape(
 ///
 /// Without throttle there is no sweep to weight, and the two ends of the
 /// configured range are all that can honestly be claimed.
-fn lowpass_shape(lpf: &LowpassConfig, throttle: Option<&[f64]>, fs: f64) -> Option<OverlayShape> {
+fn lowpass_shape(
+    lpf: &LowpassConfig,
+    throttle: Option<&[f64]>,
+    grid: &Grid<'_>,
+) -> Option<Lowpass> {
+    let (fs, filter_type) = (grid.fs, lpf.filter_type);
     if !lpf.is_dynamic() {
-        return static_lowpass_shape(lpf.static_hz as f64, lpf.filter_type, fs);
+        return static_lowpass(lpf.static_hz as f64, filter_type, fs);
     }
+    let lowpass_at = move |cutoff_hz| Stage::Lowpass {
+        cutoff_hz,
+        filter_type,
+    };
     let (min, max) = (lpf.dyn_min_hz as f64, lpf.dyn_max_hz as f64);
+
+    // No throttle, no sweep to weight: two real rolloffs at the configured
+    // extremes say "somewhere between these", and the label says the range is
+    // the configured one rather than one this flight was measured to use.
     let Some(dwell) = throttle.and_then(|t| dwell_histogram(&cutoffs(lpf, t), min, max)) else {
-        return Some(OverlayShape::Band {
-            low_hz: min,
-            high_hz: max,
+        return Some(Lowpass {
+            shape: OverlayShape::Envelope {
+                low: filter_response::of(lowpass_at(min), fs)?,
+                high: filter_response::of(lowpass_at(max), fs)?,
+            },
+            suffix: format!(" (dyn, {}, config)", range_hz(min, max)),
+            settings: None,
+            dwell: None,
         });
     };
 
-    let filter_type = lpf.filter_type;
-    filter_response::weighted(
-        &dwell.stages(|cutoff_hz| Stage::Lowpass {
-            cutoff_hz,
-            filter_type,
-        }),
-        1.0,
-        max * 8.0,
-        fs,
-    )
-    .map(OverlayShape::Response)
+    let settings = dwell.stages(lowpass_at);
+    let (low, high) = dwell.realised_range().unwrap_or((min, max));
+    Some(Lowpass {
+        shape: OverlayShape::Response(filter_response::weighted(&settings, 1.0, max * 8.0, fs)?),
+        suffix: format!(" (dyn, {})", range_hz(low, high)),
+        settings: Some(settings),
+        dwell: Some(dwell),
+    })
+}
+
+/// The two ends of a range, as a pilot reads a range.
+fn range_hz(low: f64, high: f64) -> String {
+    format!("{low:.0}–{high:.0} Hz")
 }
 
 /// The cutoff this stage ran at on every logged frame, from the throttle the
@@ -452,6 +622,16 @@ mod test {
     use crate::parser::FlightData;
     use crate::parser::metadata::{DynNotchConfig, FilterType, StaticLowpassConfig};
 
+    /// 8 kHz, and a coarse stand-in for the PSD's bins — the grid a gain is
+    /// precomputed on is the spectrum's, whatever its resolution.
+    fn grid() -> Grid<'static> {
+        const BINS: &[f64] = &[100.0, 200.0, 300.0, 400.0, 500.0, 600.0];
+        Grid {
+            fs: 8000.0,
+            freq_hz: BINS,
+        }
+    }
+
     fn notch(center_hz: f32, cutoff_hz: f32) -> NotchConfig {
         NotchConfig {
             center_hz,
@@ -464,8 +644,9 @@ mod test {
     /// lands where the pilot configured it is this one's.
     #[test]
     fn a_notch_draws_its_null_at_the_centre_the_pilot_set() {
-        let OverlayShape::Response(response) = notch_shape(&notch(200.0, 100.0), 8000.0) else {
-            panic!("a notch with a usable cutoff has a response");
+        let (OverlayShape::Response(response), Some(_)) = notch_shape(&notch(200.0, 100.0), 8000.0)
+        else {
+            panic!("a notch with a usable cutoff has a response and a stage");
         };
 
         let (null, gain) = response.deepest().expect("a curve was drawn");
@@ -477,7 +658,7 @@ mod test {
     #[test]
     fn a_higher_q_notch_is_narrower() {
         let near_edge = |cutoff| {
-            let OverlayShape::Response(response) = notch_shape(&notch(200.0, cutoff), 8000.0)
+            let (OverlayShape::Response(response), _) = notch_shape(&notch(200.0, cutoff), 8000.0)
             else {
                 panic!("expected a response");
             };
@@ -488,17 +669,36 @@ mod test {
     }
 
     /// A cutoff at or above the centre is not a notch we can size. It stays a
-    /// line rather than becoming a curve of invented depth.
+    /// line rather than becoming a curve of invented depth — and a shape we
+    /// cannot derive carries no stage, so it takes no part in the chain total.
     #[test]
     fn a_notch_without_a_usable_cutoff_stays_a_line() {
-        assert_eq!(
-            notch_shape(&notch(200.0, 0.0), 8000.0),
-            OverlayShape::Line { hz: 200.0 }
+        for cutoff in [0.0, 300.0] {
+            assert_eq!(
+                notch_shape(&notch(200.0, cutoff), 8000.0),
+                (OverlayShape::Line { hz: 200.0 }, None)
+            );
+        }
+        assert!(
+            notches(&[notch(200.0, 0.0)], FilterLoop::Gyro, &grid())[0]
+                .gain
+                .is_none()
         );
-        assert_eq!(
-            notch_shape(&notch(200.0, 300.0), 8000.0),
-            OverlayShape::Line { hz: 200.0 }
-        );
+    }
+
+    /// A static notch's gain lands on the spectrum's own bins, so the panel's
+    /// chain total is a product over the raw trace's own points.
+    #[test]
+    fn a_static_notch_carries_its_gain_on_the_spectrums_grid() {
+        let overlays = notches(&[notch(300.0, 280.0)], FilterLoop::Gyro, &grid());
+        let Some(ByAxis::Shared(gain)) = &overlays[0].gain else {
+            panic!("a sizeable notch carries a shared gain");
+        };
+
+        assert_eq!(gain.len(), grid().freq_hz.len());
+        // The bin at the centre is nulled; the ones at either end are not.
+        assert!(gain[2] < 0.1, "{gain:?}");
+        assert!(gain[0] > 0.9 && gain[5] > 0.9, "{gain:?}");
     }
 
     fn dynamic_lpf() -> LowpassConfig {
@@ -518,7 +718,7 @@ mod test {
     fn a_dynamic_lowpass_is_the_corner_the_throttle_actually_held_it_at() {
         let idle = vec![1000.0; 64];
         let Some(OverlayShape::Response(response)) =
-            lowpass_shape(&dynamic_lpf(), Some(&idle), 8000.0)
+            lowpass_shape(&dynamic_lpf(), Some(&idle), &grid()).map(|l| l.shape)
         else {
             panic!("a throttle trace gives the swept response");
         };
@@ -536,7 +736,7 @@ mod test {
 
         let corner = |throttle: &[f64]| {
             let Some(OverlayShape::Response(r)) =
-                lowpass_shape(&dynamic_lpf(), Some(throttle), 8000.0)
+                lowpass_shape(&dynamic_lpf(), Some(throttle), &grid()).map(|l| l.shape)
             else {
                 panic!("expected a response");
             };
@@ -547,16 +747,57 @@ mod test {
     }
 
     /// Without throttle there is no sweep to weight, and the configured range
-    /// is all that can honestly be claimed.
+    /// is all that can honestly be claimed — as two real rolloffs at its two
+    /// ends, never as a span saying everything between them is gone. The label
+    /// says `config`, so a configured range is never read as a measured one,
+    /// and there is no gain to cascade from a sweep nothing weighted.
     #[test]
-    fn a_dynamic_lowpass_without_throttle_falls_back_to_its_range() {
-        assert_eq!(
-            lowpass_shape(&dynamic_lpf(), None, 8000.0),
-            Some(OverlayShape::Band {
-                low_hz: 250.0,
-                high_hz: 500.0
-            })
+    fn a_dynamic_lowpass_without_throttle_draws_the_two_ends_it_ran_between() {
+        let drawn = lowpass_shape(&dynamic_lpf(), None, &grid()).expect("a configured range");
+
+        let OverlayShape::Envelope { low, high } = &drawn.shape else {
+            panic!("no throttle gives an envelope, not a span");
+        };
+        assert!(low.corner().unwrap().0 < high.corner().unwrap().0);
+        assert_eq!(drawn.suffix, " (dyn, 250–500 Hz, config)");
+        assert!(drawn.settings.is_none() && drawn.dwell.is_none());
+    }
+
+    /// The name carries the range the stage really used, not the range it was
+    /// allowed: a flight held near idle never took the corner anywhere near
+    /// the configured maximum, and a label saying otherwise describes a filter
+    /// that was not running.
+    #[test]
+    fn a_dynamic_lowpass_is_named_by_the_range_it_really_used() {
+        let idle: Vec<f64> = vec![1050.0; 64];
+        let drawn = lowpass_shape(&dynamic_lpf(), Some(&idle), &grid()).expect("a swept response");
+
+        assert!(
+            drawn.suffix.starts_with(" (dyn, 25"),
+            "held at idle, the label reads {:?}",
+            drawn.suffix
         );
+        assert!(!drawn.suffix.contains("config"));
+        assert!(drawn.dwell.is_some(), "the dwell is kept, not dropped");
+
+        let worked: Vec<f64> = (0..64).map(|i| 1000.0 + i as f64 * 1000.0 / 63.0).collect();
+        let swept = lowpass_shape(&dynamic_lpf(), Some(&worked), &grid()).expect("a response");
+        assert_ne!(swept.suffix, drawn.suffix);
+    }
+
+    /// The label is the stage's name plus what it did, and a static stage adds
+    /// nothing to its own.
+    #[test]
+    fn a_static_stage_is_named_by_itself_alone() {
+        let cfg = FilterConfig {
+            gyro_lpf1: Some(LowpassConfig {
+                static_hz: 200.0,
+                ..dynamic_lpf()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(lowpasses(&cfg, None, &grid())[0].label, "Gyro LPF1");
     }
 
     /// A static stage never swept, so the throttle is beside the point.
@@ -566,7 +807,8 @@ mod test {
             static_hz: 300.0,
             ..dynamic_lpf()
         };
-        let Some(OverlayShape::Response(response)) = lowpass_shape(&static_lpf, None, 8000.0)
+        let Some(OverlayShape::Response(response)) =
+            lowpass_shape(&static_lpf, None, &grid()).map(|l| l.shape)
         else {
             panic!("a static lowpass has a response without any flight data");
         };
@@ -732,6 +974,7 @@ mod test {
         let overlays = dyn_notch(
             &traced_log(centres).trimmed(0.0),
             &dyn_notch_metadata("FFT_FREQ"),
+            &grid(),
         );
         let OverlayShape::Traced(per_axis) = &overlays[1].shape else {
             panic!("the second dyn notch overlay is the response");
@@ -828,16 +1071,67 @@ mod test {
         let overlays = dyn_notch(
             &traced_log(vec![250.0; 8]).trimmed(0.0),
             &dyn_notch_metadata("GYRO_SCALED"),
+            &grid(),
         );
 
         assert_eq!(overlays.len(), 1);
         assert_eq!(
             overlays[0].shape,
-            OverlayShape::Band {
+            OverlayShape::Allowed {
                 low_hz: 100.0,
                 high_hz: 500.0
             }
         );
+        // Bounds are not a cut: nothing here may reach the chain total.
+        assert!(overlays[0].gain.is_none());
+    }
+
+    /// The tracked notch is the one overlay measured per axis, so both the gain
+    /// the total is a product over and the dwell the lane draws are per axis
+    /// too — roll's tracker and yaw's went to different places.
+    #[test]
+    fn the_traced_notch_carries_a_gain_and_a_dwell_per_axis() {
+        let overlays = dyn_notch(
+            &traced_log(vec![250.0; 16]).trimmed(0.0),
+            &dyn_notch_metadata("FFT_FREQ"),
+            &grid(),
+        );
+        let traced = &overlays[1];
+
+        let gain = traced
+            .gain
+            .as_ref()
+            .and_then(|g| g.get(Axis::Roll))
+            .expect("roll was traced");
+        assert_eq!(gain.len(), grid().freq_hz.len());
+        // 250 Hz is between the 200 and 300 Hz bins, and a notch pinned there
+        // takes a real bite out of both.
+        assert!(gain[1] < 0.9 && gain[2] < 0.9, "{gain:?}");
+
+        let dwell = traced
+            .dwell
+            .as_ref()
+            .and_then(|d| d.get(Axis::Roll))
+            .expect("roll has a dwell");
+        assert!((dwell.weight.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert_eq!(dwell.weight.iter().filter(|&&w| w > 0.0).count(), 1);
+
+        assert!(traced.dwell.as_ref().unwrap().get(Axis::Pitch).is_none());
+    }
+
+    /// The percentiles the label is cut to: weights are time, so a filter that
+    /// spent almost the whole window on one setting is named by that setting
+    /// and not by the blip either side of it.
+    #[test]
+    fn the_realised_range_is_where_the_filter_spent_the_window() {
+        let mut samples = vec![300.0; 100];
+        samples[0] = 110.0;
+        samples[99] = 490.0;
+        let dwell = dwell_histogram(&samples, 100.0, 500.0).expect("a hundred samples");
+
+        let (low, high) = dwell.realised_range().expect("a range");
+        assert!((low - high).abs() < 20.0, "{low}..{high}");
+        assert!((250.0..350.0).contains(&low), "{low}..{high}");
     }
 
     /// The count Betaflight logs is one centre per axis however many notches
@@ -847,7 +1141,7 @@ mod test {
         let mut metadata = dyn_notch_metadata("NONE");
         metadata.filters.dyn_notch.as_mut().unwrap().count = 3;
 
-        let overlays = dyn_notch(&traced_log(vec![250.0; 8]).trimmed(0.0), &metadata);
+        let overlays = dyn_notch(&traced_log(vec![250.0; 8]).trimmed(0.0), &metadata, &grid());
         assert_eq!(overlays[0].label, "Dyn notch range (×3)");
     }
 
@@ -861,7 +1155,7 @@ mod test {
             ..Default::default()
         };
 
-        let overlays = lowpasses(&cfg, None, 8000.0);
+        let overlays = lowpasses(&cfg, None, &grid());
         assert_eq!(overlays.len(), 1);
         assert_eq!(overlays[0].family, OverlayFamily::Lowpass(FilterLoop::Gyro));
     }

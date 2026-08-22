@@ -203,7 +203,7 @@ fn a_fft_freq_fixture_carries_both_the_configured_range_and_the_traced_response(
 
     assert_eq!(
         dyn_notch[0].shape,
-        OverlayShape::Band {
+        OverlayShape::Allowed {
             low_hz: 90.0,
             high_hz: 400.0
         }
@@ -249,7 +249,7 @@ fn a_log_flown_in_another_debug_mode_still_gets_the_configured_range() {
     assert!(!loaded.logs[0].metadata.logs_dyn_notch_trace());
     let dyn_notch = family(overlays, OverlayFamily::DynNotch);
     assert_eq!(dyn_notch.len(), 1, "the range, and no trace");
-    assert!(matches!(dyn_notch[0].shape, OverlayShape::Band { .. }));
+    assert!(matches!(dyn_notch[0].shape, OverlayShape::Allowed { .. }));
 }
 
 /// Both gyro lowpass stages reach the plot as the rolloff they are, not as a
@@ -288,6 +288,72 @@ fn the_gyro_lowpasses_reach_the_plot_as_their_rolloffs() {
         "LPF2 corner at {lpf2:.0} Hz"
     );
     assert!(lpf2 > lpf1);
+}
+
+/// The chain total the panel multiplies per frame is only arithmetic because
+/// every stage's gain was precomputed on the spectrum's own bins at load. If a
+/// stage reaches the panel without one, or with one of the wrong length, it
+/// silently drops out of the total.
+#[test]
+fn every_gyro_stage_reaches_the_panel_with_a_gain_on_the_spectrums_grid() {
+    let loaded = ready(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let spectral = &loaded.analysis[0].spectral;
+    let bins = spectral
+        .axis(Axis::Roll)
+        .expect("roll was analysed")
+        .raw_psd
+        .freq_hz
+        .len();
+
+    let gyro: Vec<&FilterOverlay> = spectral
+        .overlays
+        .iter()
+        .filter(|o| o.family.filter_loop() == Some(FilterLoop::Gyro))
+        .collect();
+    assert!(!gyro.is_empty());
+
+    for overlay in gyro {
+        // The configured dyn-notch bounds are the one gyro overlay with no
+        // gain: bounds are not a cut, and nothing may put them in a total.
+        let Some(gain) = &overlay.gain else {
+            assert!(
+                matches!(overlay.shape, OverlayShape::Allowed { .. }),
+                "{} reaches the panel with no gain",
+                overlay.label
+            );
+            continue;
+        };
+        let gain = gain.get(Axis::Roll).expect("roll has a gain");
+
+        assert_eq!(gain.len(), bins, "{}", overlay.label);
+        assert!(
+            gain.iter().all(|&g| (0.0..=1.0001).contains(&g)),
+            "{} amplifies something",
+            overlay.label
+        );
+    }
+}
+
+/// The label a dynamic stage carries is the range it really used. This fixture
+/// hovered, so LPF1 lived near the bottom of its 250..500 Hz range — and the
+/// old label, `Gyro LPF1`, read as one soft static rolloff.
+#[test]
+fn a_dynamic_lowpass_is_named_by_the_cutoffs_the_throttle_produced() {
+    let overlays = overlays(load(&LogLoader::default(), "new202612_BF_steadyhover.BFL"));
+    let gyro = family(&overlays, OverlayFamily::Lowpass(FilterLoop::Gyro));
+
+    // A steady hover barely moved the cutoff, so the realised range is a few
+    // hertz wide inside the configured 250..500 — which is the whole point of
+    // naming a stage by what it did rather than by what it was allowed to do.
+    let label = &gyro[0].label;
+    assert!(label.starts_with("Gyro LPF1 (dyn, 3"), "{label}");
+    assert!(!label.contains("config"), "{label}");
+    assert!(!label.contains("250–500"), "{label}");
+    assert!(gyro[0].dwell.is_some(), "the dwell survives the average");
+
+    // LPF2 never moved, so its name says nothing beyond the stage's own.
+    assert_eq!(gyro[1].label, "Gyro LPF2");
+    assert!(gyro[1].dwell.is_none());
 }
 
 /// A notch that was never enabled is not a filter at zero hertz.

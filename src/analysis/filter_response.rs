@@ -126,16 +126,50 @@ pub fn weighted(
     let (freq_hz, gain_db) = (0..RESPONSE_POINTS)
         .map(|i| {
             let freq = from + i as f64 * step;
-            let power: f64 = stages
-                .iter()
-                .map(|&(stage, weight)| weight * stage.power_gain(freq, sample_rate_hz))
-                .sum();
+            let power = expected_gain(stages, freq, sample_rate_hz);
 
             (freq, (10.0 * power.log10()).clamp(MIN_GAIN_DB, 0.0))
         })
         .unzip();
 
     Some(FilterResponse { freq_hz, gain_db })
+}
+
+/// The share of the power at `freq_hz` one stage passed on average, over every
+/// setting it ran at — the weight-sum of `|H(f)|²`, weights summing to one.
+///
+/// In power, not in decibels, for the reason [`weighted`] gives: a frequency
+/// notched hard for a tenth of the flight kept nine tenths of its energy.
+pub fn expected_gain(settings: &[(Stage, f64)], freq_hz: f64, sample_rate_hz: f64) -> f64 {
+    settings
+        .iter()
+        .map(|&(stage, weight)| weight * stage.power_gain(freq_hz, sample_rate_hz))
+        .sum()
+}
+
+/// A whole chain's power gain on a caller-supplied grid: at each frequency, the
+/// product of every stage's expected gain. One stage is one slice of
+/// `(setting, weight)` pairs, so a static stage is a single `(stage, 1.0)`.
+///
+/// The grid is the spectrum's own, so the chain total can be drawn down from
+/// the raw trace's own points with no resampling, and re-multiplied per frame
+/// over whichever stages the pilot has visible.
+///
+/// A product of expected gains treats the stages as independent, which two
+/// dynamic stages both tracking throttle are not: each is averaged over its own
+/// settings first, so the pairing between them is lost. It is a mild
+/// approximation, and a smaller error than drawing no total at all.
+pub fn cascade(stages: &[&[(Stage, f64)]], freq_hz: &[f64], sample_rate_hz: f64) -> Vec<f64> {
+    freq_hz
+        .iter()
+        .map(|&freq| {
+            stages
+                .iter()
+                .filter(|settings| !settings.is_empty())
+                .map(|settings| expected_gain(settings, freq, sample_rate_hz))
+                .product()
+        })
+        .collect()
 }
 
 /// The RBJ cookbook notch: `b = [1, -2cos w0, 1]`, `a = [1 + α, -2cos w0, 1 - α]`.
@@ -354,6 +388,75 @@ mod test {
         let (edge, _) = notch.corner().expect("a notch has a near edge");
         assert!((edge - 175.0).abs() < 10.0, "near edge at {edge:.0} Hz");
         assert!(notch.deepest().unwrap().0 > edge);
+    }
+
+    /// Cascading is a multiply in power, so two stages cutting the same
+    /// frequency take off the sum of their decibels — the arithmetic no pilot
+    /// can do by eye across three curves in one colour.
+    #[test]
+    fn a_cascade_is_the_product_of_the_stages_gains() {
+        let notch = Stage::Notch {
+            centre_hz: 300.0,
+            q: 4.0,
+        };
+        let lpf = Stage::Lowpass {
+            cutoff_hz: 200.0,
+            filter_type: FilterType::Pt1,
+        };
+        let grid = [100.0, 200.0, 300.0, 400.0];
+
+        let total = cascade(&[&[(notch, 1.0)], &[(lpf, 1.0)]], &grid, FS);
+
+        for (i, &freq) in grid.iter().enumerate() {
+            let expected = notch.power_gain(freq, FS) * lpf.power_gain(freq, FS);
+            assert!((total[i] - expected).abs() < 1e-12, "at {freq} Hz");
+        }
+    }
+
+    /// The one-stage case is what a single curve already draws, so the two
+    /// cannot be allowed to disagree about the depth of the same notch.
+    #[test]
+    fn one_stage_cascaded_is_the_curve_that_stage_draws() {
+        let swept: Vec<(Stage, f64)> = (0..4)
+            .map(|i| {
+                (
+                    Stage::Notch {
+                        centre_hz: 200.0 + 50.0 * i as f64,
+                        q: 4.0,
+                    },
+                    0.25,
+                )
+            })
+            .collect();
+        let curve = weighted(&swept, 100.0, 500.0, FS).unwrap();
+
+        let total = cascade(&[&swept], &curve.freq_hz, FS);
+        for (i, &gain) in curve.gain_db.iter().enumerate() {
+            assert!(((10.0 * total[i].log10()).max(MIN_GAIN_DB) - gain).abs() < 1e-9);
+        }
+    }
+
+    /// A stage that takes nothing leaves the chain where it found it — which
+    /// is what makes hiding a family a plain multiply rather than a rebuild.
+    #[test]
+    fn a_stage_that_takes_nothing_leaves_the_total_alone() {
+        let notch = Stage::Notch {
+            centre_hz: 300.0,
+            q: 4.0,
+        };
+        // Two octaves below its corner a lowpass passes everything.
+        let far_below = Stage::Lowpass {
+            cutoff_hz: 3000.0,
+            filter_type: FilterType::Pt1,
+        };
+        let grid = [280.0, 300.0, 320.0];
+
+        let alone = cascade(&[&[(notch, 1.0)]], &grid, FS);
+        let with_unity = cascade(&[&[(notch, 1.0)], &[(far_below, 1.0)]], &grid, FS);
+
+        for (a, b) in alone.iter().zip(&with_unity) {
+            assert!((a - b).abs() < 0.02, "{a} against {b}");
+        }
     }
 
     /// Nothing above Nyquist exists to draw, and a stage with no settings has

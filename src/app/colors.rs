@@ -5,6 +5,7 @@
 use egui::{Color32, ecolor::HsvaGamma};
 use elegance::{Palette, Theme};
 
+use crate::analysis::FilterLoop;
 use crate::parser::Axis;
 
 /// How many flights a comparison can hold, and so how many colours it can
@@ -26,11 +27,16 @@ const SLOT_HUES: [f32; COMPARE_SLOTS] = [0.0, 0.08, 0.20, 0.30, 0.47, 0.65, 0.81
 /// says it.
 const MOTOR_HUES: [f32; 4] = [0.11, 0.35, 0.55, 0.79];
 
-/// Gold for a detected peak, periwinkle for a configured filter. Both were
-/// fixed RGB constants in the panels until now, which meant light mode drew
-/// the dark theme's marks.
+/// Gold for a detected peak, and one hue per filter chain — periwinkle for the
+/// gyro loop, rose for the D-term. All three were fixed RGB constants in the
+/// panels until now, which meant light mode drew the dark theme's marks.
+///
+/// Two chain hues rather than one per stage: which stage a curve is, is
+/// derivable — its corner label says so, and LPF2 always sits above LPF1 —
+/// whereas which loop it belongs to is not derivable from the shape, and it is
+/// the one that changes the CLI line the pilot types.
 const PEAK_HUE: f32 = 0.14;
-const FILTER_HUE: f32 = 0.63;
+const CHAIN_HUES: [f32; 2] = [0.63, 0.93];
 
 /// A motor's mark is a thin outline or a curve among twelve, so it takes full
 /// saturation — and on a light background a lower value, because a hue at full
@@ -80,10 +86,15 @@ pub(in crate::app) fn peak_color(palette: &Palette) -> Color32 {
     hue_color(palette, PEAK_HUE, BASE_SATURATION)
 }
 
-/// A configured filter's line or band — a reference the pilot set, not
-/// something the craft did.
-pub(in crate::app) fn filter_color(palette: &Palette) -> Color32 {
-    hue_color(palette, FILTER_HUE, BASE_SATURATION)
+/// One filter chain's hue. Everything within a chain — the total, its stage
+/// curves, the fill under it and its dwell lane — wears this one colour and
+/// separates by width and alpha instead.
+pub(in crate::app) fn chain_color(palette: &Palette, loop_: FilterLoop) -> Color32 {
+    let hue = match loop_ {
+        FilterLoop::Gyro => CHAIN_HUES[0],
+        FilterLoop::Dterm => CHAIN_HUES[1],
+    };
+    hue_color(palette, hue, BASE_SATURATION)
 }
 
 /// One motor's colour, 0-based. Four hues, cycled past the fourth: a hex or an
@@ -246,7 +257,31 @@ mod test {
         let [dark, light] = palettes();
 
         assert_ne!(peak_color(&dark), peak_color(&light));
-        assert_ne!(filter_color(&dark), filter_color(&light));
         assert_ne!(motor_color(&dark, 0), motor_color(&light, 0));
+        for loop_ in [FilterLoop::Gyro, FilterLoop::Dterm] {
+            assert_ne!(chain_color(&dark, loop_), chain_color(&light, loop_));
+        }
+    }
+
+    /// The one distinction a filter curve's colour carries: a D-term stage is
+    /// hanging off its own reference line because it never touched the signal
+    /// on the plot, and a pilot who reads it as a gyro stage reads the fill
+    /// underneath as including it.
+    #[test]
+    fn the_two_chains_are_different_colours_in_both_themes() {
+        for palette in palettes() {
+            let (gyro, dterm) = (
+                chain_color(&palette, FilterLoop::Gyro),
+                chain_color(&palette, FilterLoop::Dterm),
+            );
+            assert_ne!(gyro, dterm, "the chains share a colour");
+
+            for axis in Axis::ALL {
+                assert_ne!(gyro, axis_color(&palette, axis));
+                assert_ne!(dterm, axis_color(&palette, axis));
+            }
+            assert_ne!(gyro, peak_color(&palette));
+            assert_ne!(dterm, peak_color(&palette));
+        }
     }
 }

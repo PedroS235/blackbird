@@ -2,7 +2,7 @@ use egui_plot::LineStyle;
 use elegance::Palette;
 
 use super::heatmap_panel::HeatmapRow;
-use crate::analysis::{HarmonicBand, OverlayFamily};
+use crate::analysis::{FilterLoop, HarmonicBand, OverlayFamily};
 use crate::app::colors;
 use crate::app::tabs::TabCtx;
 use crate::app::ui::harmonic_key;
@@ -83,7 +83,7 @@ pub(super) fn attach_overlays<'a>(
                 ctx.flight,
                 samples,
                 1.0,
-                colors::filter_color(palette),
+                colors::chain_color(palette, FilterLoop::Gyro),
                 LineStyle::Solid,
             ));
         }

@@ -37,21 +37,30 @@ fn description(family: OverlayFamily) -> &'static str {
              motor spent the flight at; on the spectrogram, each motor's frequency over time."
         }
         OverlayFamily::DynNotch => {
-            "The range the dynamic notch may work in, and — where the log was flown in FFT_FREQ \
-             — what it actually took off, averaged over the centres its tracker chose."
+            "Where the dynamic notch was allowed to work, along the plot floor, and — where the \
+             log was flown in FFT_FREQ — what it actually took off, averaged over the centres its \
+             tracker chose, with the time it spent at each drawn in the same lane."
         }
         OverlayFamily::Notch(l) => match l {
-            FilterLoop::Gyro => "What each static gyro notch removes, at the depth its Q gives.",
-            FilterLoop::Dterm => "What each static D-term notch removes, at the depth its Q gives.",
+            FilterLoop::Gyro => GYRO_STAGE,
+            FilterLoop::Dterm => DTERM_STAGE,
         },
         OverlayFamily::Lowpass(l) => match l {
-            FilterLoop::Gyro => "How the gyro lowpass stages roll off, at the cutoffs they ran at.",
-            FilterLoop::Dterm => {
-                "How the D-term lowpass stages roll off, at the cutoffs they ran at."
-            }
+            FilterLoop::Gyro => GYRO_STAGE,
+            FilterLoop::Dterm => DTERM_STAGE,
         },
     }
 }
+
+/// What a chain's stages are drawn as. One text per loop rather than one per
+/// family: what separates a gyro overlay from a D-term one is which signal it
+/// acted on, and every stage of a chain is drawn the same way.
+const GYRO_STAGE: &str = "Drawn on the data: the visible gyro stages cascaded into one total, hung off the raw \
+     spectrum's own points, with the region between the two filled — that fill is the energy the \
+     chain removed. Each stage keeps its own thin curve underneath.";
+const DTERM_STAGE: &str = "This plot is gyro power, and the D-term stages never touched it — so they are drawn \
+     against their own 0 dB line rather than against your spectrum, and take no part in the gyro \
+     chain's total. A peak here is what the D-term filters had to survive.";
 
 /// Detected noise peaks are not a filter — nothing configured them, the
 /// analysis found them — so they are not an `OverlayFamily`. They get a toggle
@@ -111,6 +120,16 @@ impl OverlayVisibility {
 
     pub(in crate::app) fn shows_peaks(&self) -> bool {
         self.peaks
+    }
+
+    /// Everything on, for a panel test that has to draw every overlay a log
+    /// can produce — nothing in the app turns them all on at once.
+    #[cfg(test)]
+    pub(in crate::app) fn all_on() -> Self {
+        Self {
+            families: [true; MENU_ORDER.len()],
+            peaks: true,
+        }
     }
 }
 

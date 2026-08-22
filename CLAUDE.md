@@ -241,9 +241,45 @@ at load time, stored on `Analysis`. It is not a pure function the panel calls
 per frame: the geometry depends on the analysed window, which is fixed at
 load, and storing it puts the feature behind the loader integration seam.
 
-- One `FilterOverlay { label, family, shape }`. `OverlayFamily` carries the
-  gyro/D-term loop, so a panel selects gyro overlays by matching the type
-  rather than by `label.starts_with("Gyro")`
+- One `FilterOverlay { label, family, shape, gain, dwell }`. `OverlayFamily`
+  carries the gyro/D-term loop — `filter_loop()`, with the dynamic notch a gyro
+  stage — so a panel selects one chain's overlays by matching the type rather
+  than by `label.starts_with("Gyro")`
+- **An overlay is a claim about *this* spectrum, so it is drawn against this
+  spectrum.** The visible gyro stages are cascaded into one **chain total**,
+  drawn at `raw_db − chain_gain_db` — on the raw curve's own scale, at its own
+  frequencies — and the region between the two is **filled**. That fill *is* the
+  energy the chain removed: thick where the chain worked, a hairline where it
+  did nothing, so "where is this filter actually being used" is read as "where
+  is the fill thick", with no legend and no arithmetic in decibels. The old
+  `anchor_db` `hline` was the raw peak, which is a level and not a reference: a
+  stage taking 12 dB off a 340 Hz peak and one taking 12 dB off silence drew the
+  identical mark
+- **No threshold on the fill.** It is drawn everywhere the total differs from
+  raw at all. A cut-in at 3 dB would draw a vertical edge the physics does not
+  have — the same "boundary where there is none" defect that killed the harmonic
+  spans
+- **`gain` is every stage's power gain, precomputed at load on the PSD's own
+  frequency grid** (`filter_response::cascade`), per axis where the shape is
+  `Traced`. So the total is an elementwise product per frame — ~513 bins × a
+  handful of stages — and the fill's two edges share their x with the raw trace
+  with no resampling. A null narrower than a bin cannot be represented, which is
+  correct rather than a compromise: the spectrum cannot show attenuation finer
+  than its own resolution either. Cascading multiplies each stage's *expected*
+  gain, which treats two throttle-tracking dynamic stages as independent — noted
+  at the call site, and a smaller error than drawing no total at all
+- **Per-stage curves survive underneath, thin and dimmed, anchored the same
+  way** — the fine 512-point response, hung off the raw trace at each of its own
+  frequencies through `ui::hover::y_at`. They are shape, not magnitude: which of
+  three overlapping stages owns a bin is not a question the plot answers,
+  because the honest answer is "all of them, multiplied", and the total says it
+- **The D-term chain is present but never anchored.** The PSD plots gyro power,
+  and the D-term lowpasses never touched that signal, so anchoring them to the
+  raw curve would claim an attenuation that did not happen to the trace being
+  drawn. They keep their curves — a 200 Hz peak is exactly what the D-term LPF
+  has to survive — in their own hue, hanging from a labelled unity-gain line
+  that is drawn only while a D-term family is on. `response_anchor_db` is now
+  that line and nothing else
 - `OverlayShape::Response` — what a filter took off, per frequency, from
   `analysis::filter_response`. A notch is a V and a lowpass is a rolloff;
   drawn as a line or a band, both read as "everything here is gone", which is
@@ -252,6 +288,19 @@ load, and storing it puts the feature behind the loader integration seam.
   dynamic notch, whose centre Betaflight logs one of per axis. Read from
   `debug[0..3]`, gated on `Metadata::logs_dyn_notch_trace()` (debug mode
   `FFT_FREQ`) — the one rule, shared with the Spectrogram sub-tab's overlay
+- **A dynamic stage says that it moved, and where it lived.** Its name carries
+  the range it *really used* — `Gyro LPF1 (dyn, 322–326 Hz)`, the p5–p95 of the
+  realised cutoffs, the same percentile rule the harmonic bands are cut to —
+  and where no throttle was logged the label says `config` so a configured
+  range is never read as a measured one. The `Dwell` histogram the average is
+  taken over is **kept** and drawn as a filled histogram in a short lane along
+  the plot floor, in the owning chain's hue: a pinned notch is a spike, a
+  roaming one a plateau. One scale across the lane, so the two read
+  differently. The lane is sized from the plot's own bounds each frame, so it
+  holds its height under zoom. Time is a third variable on a plot whose two
+  axes are spent, and it gets its own strip of pixels — a curve faded by dwell
+  reads as *uncertainty*, which is a different and wrong claim, and is
+  indistinguishable from a curve that is merely shallow
 - **A filter that moved is averaged over the settings it moved through**,
   weighted by how long it spent at each and averaged **in power, not in
   decibels**. A frequency notched hard for a tenth of the flight and untouched
@@ -260,8 +309,15 @@ load, and storing it puts the feature behind the loader integration seam.
   draws a deep narrow V and a roaming one draws a broad shallow trough; a
   dynamic LPF is averaged over the cutoffs the *throttle* actually produced,
   through Betaflight's own `dynLpfCutoffFreq` curve
-- `OverlayShape::Band` — only what a filter is *allowed* to do: the dynamic
-  notch's configured bounds, and a dynamic LPF whose log has no throttle
+- `OverlayShape::Allowed` — only what a filter was *allowed* to do, with
+  nothing logged to say where it went: the dynamic notch's configured bounds,
+  drawn in the dwell lane rather than over the spectrum. A span across the curve
+  says "everything in here is gone", the misread the response curves exist to
+  kill
+- `OverlayShape::Envelope` — a dynamic LPF whose log has no throttle: two real
+  rolloffs at the configured extremes, saying "somewhere between these" in the
+  plot's own language. It carries no `gain` — bounds are not a cut, and a total
+  must not claim an attenuation nothing could weight
 - `OverlayShape::Line` — only a notch whose cutoff cannot give a Q, so its
   shape cannot be derived. Everything sizeable draws its response
 - `OverlayShape::Harmonics` — one band per motor per order, from `eRPM`, over
@@ -303,11 +359,22 @@ load, and storing it puts the feature behind the loader integration seam.
   filters Betaflight runs, so a stage's real corner sits somewhat below its
   configured one once that cutoff is a sizeable fraction of the loop rate.
   That gap is a true thing about the tune, and the curve keeps it
+- **Two filter hues, one per loop** (`colors::chain_color`), never one per
+  stage. Everything within a chain — total, per-stage curves, fill, dwell lane
+  — shares its chain's hue and separates by width and alpha. Which stage a
+  curve is, is derivable: its corner label says so, and LPF2 always sits above
+  LPF1. Which loop it belongs to is not, and it is the one that changes the CLI
+  line the pilot types
 - `eRPM` → Hz is `erpm * 100 / (poles / 2) / 60`. `motor_poles` comes from the
   raw header passthrough, defaulting to Betaflight's 14
 - Overlay visibility is UI state (`ui::overlay_menu::OverlayVisibility`), a
   shared type with a separate instance per sub-tab, every family off by
-  default, toggled from an inline wrapped row above the plots. Toggling one never recomputes anything. Detected peaks get a switch
+  default, toggled from an inline wrapped row above the plots. Toggling one
+  never recomputes anything — with one exception, and it is arithmetic rather
+  than analysis: the chain total is a per-frame product over the *visible*
+  stages' precomputed gain arrays. A fixed whole-chain total would lie to a
+  pilot who switched the dynamic notch off and still saw its cut in the curve.
+  Detected peaks get a switch
   there too, and default off with the rest — they are not a filter and so not
   an `OverlayFamily`, but to a pilot they are one more thing drawn over the
   curve
@@ -580,6 +647,14 @@ _(none yet — project is in initial setup)_
 | `PlotState` lives in `app.rs`, passed to all panels | Future panels (spectral, step response) share the same time range and cursor |
 | Flights are named by `LogId`, never by index | `LogStore::remove` shifts every later index, and panel state the store cannot see would then redraw a different file under the old label |
 | Panels reach other flights through a read-only catalog on `TabCtx` | A panel handed `&LogStore` could `select` or `remove` mid-frame while the sidepanel iterates it |
+| The gyro chain is drawn on the data; the D-term chain off its own reference | The pilot's question is *did this filter do anything to that peak*, and a curve floating over the plot cannot answer it. The gyro stages acted on the signal being drawn, so they hang off it and the removed energy is a fill. The D-term stages never touched `gyroUnfilt` — anchoring them there states a falsehood about the trace, and removing them loses real tuning context, so they are present, unanchored, in their own hue |
+| The chain total is a per-frame product over the *visible* stages | Three curves in one colour left the pilot multiplying decibels by eye, which is not a thing eyes do. A fixed whole-chain total would instead lie to a pilot who switched a family off. Multiplying precomputed gain arrays is not the FFT that "toggling never recomputes anything" exists to prevent |
+| Stage gains precomputed on the PSD's own grid, not resampled per frame | The fill's two edges then share x with the raw trace by construction, and the per-frame cost is ~513 multiplies per stage per axis. A null narrower than a bin is lost, which is honest: the spectrum cannot show attenuation finer than its own resolution either |
+| The removed energy is a fill with no dB threshold | Thickness is the signal, and an area is a quantity — which is what "what the chain removed" is. A cut-in at 3 dB invents a vertical edge, the same misread the harmonic spans were removed for |
+| A dynamic stage's label carries its realised p5–p95, not its configured range | `gyro_lpf1` is dynamic by default, and `Gyro LPF1` read as one soft static rolloff — the one thing it is not. The configured range is what the filter was allowed to do; the realised range is what it did, the same distinction the harmonic bands were narrowed to make |
+| The dwell histogram is kept and drawn in a floor lane | It was computed for every dynamic stage and thrown away, and it is the only thing that separates a notch pinned on one frequency from one roaming across a range — a distinction the weighted average exactly divides out. Time is a third variable and both axes are spent, so it gets its own strip; alpha on the curve would say "we are unsure", which is a different and wrong claim |
+| `OverlayShape::Band` dies: bounds move to the lane, the dynamic LPF gets an envelope | A span says "everything in here is gone", the precise misread the response curves were introduced to kill. Bounds are the same kind of claim as dwell — where the filter was *allowed* to be — so they belong in the lane that means that; two rolloffs at the configured extremes say "somewhere between these" in the plot's own language |
+| Two filter hues, one per loop, not one per stage | Which stage a curve is, is derivable from its corner and its order. Which loop it belongs to is not, and it is the one that changes the CLI line the pilot types |
 | Overlay geometry computed at load and stored on `Analysis` | It depends on the analysed window, which a visibility toggle does not change — and storing it puts the feature behind the existing loader integration seam instead of needing a new one |
 | Overlays default to off, behind an inline toggle row | The panel opens as a clean spectrum, so every mark over the curve is one the pilot asked for. The toggles are laid out inline rather than in a dropdown: a button that opens a menu announces nothing, and with every family off there is no mark on the plot to hint that more exists. One wrapped row is the whole cost |
 | Harmonic identity is hue-per-motor plus style-per-order | Order is derivable — the second harmonic is at twice the first and the pilot can see that. Which motor is loud is not derivable and is the diagnosis. Colouring by order spent the only distinguishing channel on the less useful of the two facts, and left four motors indistinguishable |

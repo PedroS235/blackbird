@@ -4,7 +4,9 @@ pub mod spectral;
 pub mod step_response;
 
 pub use filter_response::{FilterResponse, Stage};
-pub use overlays::{FilterLoop, FilterOverlay, HarmonicBand, OverlayFamily, OverlayShape};
+pub use overlays::{
+    ByAxis, Dwell, FilterLoop, FilterOverlay, HarmonicBand, OverlayFamily, OverlayShape,
+};
 pub use spectral::{
     AxisSpectral, DynNotchReach, FrequencyPeak, GyroNoiseAnalyzer, SpectralAnalysis,
 };
