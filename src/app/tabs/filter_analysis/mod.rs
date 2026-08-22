@@ -1,4 +1,3 @@
-mod frequency;
 mod heatmap_panel;
 mod psd;
 mod spectrogram;
@@ -11,7 +10,6 @@ use crate::analysis::SpectralAnalysis;
 use crate::app::colors;
 use crate::app::ui::overlay_menu::{self, OverlayVisibility};
 use crate::parser::Axis;
-use frequency::Frequency;
 use heatmap_panel::{HeatmapKind, HeatmapPanel};
 use psd::Psd;
 
@@ -38,19 +36,14 @@ fn drawn_axes(analysis: &SpectralAnalysis) -> usize {
 enum FilterAnalysisTab {
     #[default]
     Psd,
-    Frequency,
     VsReference,
     Spectrogram,
 }
 
-/// Each sub-tab owns its own widget state. `Psd` and `Frequency` both carry a
-/// filtered-trace toggle, and they are deliberately separate — they used to
-/// share one field, which meant toggling one silently toggled the other.
 #[derive(Default)]
 pub(super) struct FilterAnalysis {
     selected: FilterAnalysisTab,
     psd: Psd,
-    frequency: Frequency,
     vs_reference: HeatmapPanel,
     spectrogram: HeatmapPanel,
     /// The spectrogram's own overlay switches. Its own instance, as every
@@ -71,8 +64,7 @@ impl FilterAnalysis {
             ui,
             &mut self.selected,
             &[
-                (FilterAnalysisTab::Psd, "PSD", true),
-                (FilterAnalysisTab::Frequency, "Frequency", true),
+                (FilterAnalysisTab::Psd, "Power Spectral Density", true),
                 (
                     FilterAnalysisTab::VsReference,
                     "Vs Reference",
@@ -96,7 +88,6 @@ impl FilterAnalysis {
 
         match self.selected {
             FilterAnalysisTab::Psd => self.psd.show(ui, &ctx.analysis.spectral),
-            FilterAnalysisTab::Frequency => self.frequency.show(ui, &ctx.analysis.spectral),
             FilterAnalysisTab::VsReference => {
                 self.vs_reference
                     .show(ui, HeatmapKind::VsThrottle, throttle_rows)
