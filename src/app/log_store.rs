@@ -142,7 +142,11 @@ impl LogStore {
         self.logs.remove(index);
         self.selected = match self.selected {
             Some(sel) if sel == index => {
-                (!self.logs.is_empty()).then_some(sel.min(self.logs.len() - 1))
+                if self.logs.is_empty() {
+                    None
+                } else {
+                    Some(sel.min(self.logs.len() - 1))
+                }
             }
             Some(sel) if sel > index => Some(sel - 1),
             sel => sel,
