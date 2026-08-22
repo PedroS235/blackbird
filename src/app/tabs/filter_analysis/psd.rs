@@ -1,6 +1,6 @@
-use egui::{Align2, Color32, RichText, Ui, Vec2b};
+use egui::{Align2, Color32, Id, Pos2, Rect, RichText, Stroke, Ui, Vec2b};
 use egui_plot::{
-    Bar, BarChart, FilledArea, HLine, Line, Plot, PlotPoint, PlotPoints, PlotUi, Text, VLine,
+    FilledArea, HLine, Line, Plot, PlotPoint, PlotPoints, PlotTransform, PlotUi, Text, VLine,
 };
 use elegance::Palette;
 
@@ -135,7 +135,10 @@ impl Psd {
                 ));
             }
 
-            Plot::new(plot_id(axis))
+            let plot = Plot::new(plot_id(axis))
+                // Named explicitly rather than derived from this `Ui`'s id
+                // path, so a test can read back the bounds the plot settled on.
+                .id(Id::new(plot_id(axis)))
                 .label_formatter(hover::readout("Hz", 1, readout_series))
                 .height(plot_height)
                 .x_axis_label("Hz")
@@ -176,6 +179,12 @@ impl Psd {
                         draw_peaks(plot_ui, &palette, spec);
                     }
                 });
+
+            // After the plot, in screen space: the lane is a strip of the
+            // plot, and an item inside it would be part of the bounds the plot
+            // fits itself to — which grows by its own margin every frame a
+            // strip pinned to the bottom of it is added.
+            draw_dwell_lane(ui, &palette, &plot.transform, &visible, axis);
 
             // Under the plot rather than on it: the verdict has to survive the
             // pilot zooming the offending peak off screen. It follows the
@@ -227,7 +236,6 @@ fn draw_overlays(
     for overlay in visible {
         draw_shape(plot_ui, palette, overlay, axis, anchor_db, psd);
     }
-    draw_dwell_lane(plot_ui, palette, visible, axis);
 }
 
 fn shows(visible: &[&FilterOverlay], loop_: FilterLoop) -> bool {
@@ -412,86 +420,6 @@ fn draw_stage(
     }
 }
 
-/// Where the dynamic stages spent their time, as a filled histogram along the
-/// floor of the plot.
-///
-/// Time is a third variable on a plot whose two axes are spent, so it gets its
-/// own strip of pixels rather than being encoded into the curve: a curve faded
-/// by dwell reads as uncertainty, which is a different and wrong claim, and is
-/// indistinguishable from a curve that is merely shallow. A pinned notch is a
-/// spike and a roaming one a plateau — the distinction the weighted average
-/// has exactly divided out of the curve above.
-///
-/// Sized from the plot's own bounds each frame, so the lane is a strip of the
-/// plot rather than a series in the data's decibels, and holds its height
-/// under zoom.
-fn draw_dwell_lane(
-    plot_ui: &mut PlotUi<'_>,
-    palette: &Palette,
-    visible: &[&FilterOverlay],
-    axis: Axis,
-) {
-    let bounds = plot_ui.plot_bounds();
-    let (floor, lane) = (bounds.min()[1], bounds.height() * LANE_FRACTION);
-
-    // One scale across the whole lane, so a pinned stage reads as taller than
-    // a roaming one instead of every stage filling the lane to the brim.
-    let peak = visible
-        .iter()
-        .filter_map(|o| o.dwell.as_ref()?.get(axis))
-        .flat_map(|dwell| dwell.weight.iter().copied())
-        .fold(0.0, f64::max);
-
-    for overlay in visible {
-        let color = chain_color(palette, overlay.family.filter_loop());
-
-        match (
-            &overlay.shape,
-            overlay.dwell.as_ref().and_then(|d| d.get(axis)),
-        ) {
-            (_, Some(dwell)) if peak > 0.0 => plot_ui.bar_chart(
-                BarChart::new(overlay.label.clone(), lane_bars(dwell, peak, floor, lane))
-                    .color(color.gamma_multiply_u8(LANE_ALPHA))
-                    .vertical()
-                    .allow_hover(false),
-            ),
-            // Bounds, with nothing logged to say where inside them the filter
-            // went. That is the same kind of claim as dwell — where it was
-            // allowed to be — so it belongs in the lane that means that, not
-            // as a span over the spectrum.
-            (&OverlayShape::Allowed { low_hz, high_hz }, _) => {
-                let y = floor + lane * ALLOWED_HEIGHT;
-                plot_ui.line(
-                    Line::new(overlay.label.clone(), vec![[low_hz, y], [high_hz, y]])
-                        .color(color)
-                        .width(CHAIN_WIDTH),
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
-/// One bar per visited bin, scaled against the tallest dwell on the plot.
-fn lane_bars(dwell: &Dwell, peak: f64, floor: f64, lane: f64) -> Vec<Bar> {
-    let width = match dwell.freq_hz.as_slice() {
-        [first, second, ..] => second - first,
-        _ => 1.0,
-    };
-
-    dwell
-        .freq_hz
-        .iter()
-        .zip(&dwell.weight)
-        .filter(|&(_, &weight)| weight > 0.0)
-        .map(|(&hz, &weight)| {
-            Bar::new(hz, weight / peak * lane)
-                .base_offset(floor)
-                .width(width)
-        })
-        .collect()
-}
-
 /// The spectrum's own curve, recoloured over the frequencies each motor spent
 /// the flight at: hue is the motor, style is the order.
 ///
@@ -551,6 +479,96 @@ fn spectrum_run(psd: &PsdData, band: &HarmonicBand) -> Option<PlotPoints<'static
             .map(|(&f, &v)| [f, v])
             .collect(),
     )
+}
+
+/// Where the dynamic stages spent their time, as a filled histogram along the
+/// floor of the plot.
+///
+/// Time is a third variable on a plot whose two axes are spent, so it gets its
+/// own strip of pixels rather than being encoded into the curve: a curve faded
+/// by dwell reads as uncertainty, which is a different and wrong claim, and is
+/// indistinguishable from a curve that is merely shallow. A pinned notch is a
+/// spike and a roaming one a plateau — the distinction the weighted average
+/// has exactly divided out of the curve above.
+///
+/// Painted in screen space after the plot, from its transform, rather than
+/// added to it as bar charts. The lane is a strip of the *plot*, not a series
+/// in the data's decibels: as plot items its bars would join the bounds the
+/// plot fits itself to, and a strip pinned to the bottom of those bounds
+/// re-sinks the floor by the plot's own margin on every frame — the spectrum
+/// shrank a little each time the pointer moved. Painting it takes it out of
+/// that loop and gives it a true fixed height, clipped to the plot's frame so
+/// nothing lands in the axis labels.
+fn draw_dwell_lane(
+    ui: &Ui,
+    palette: &Palette,
+    transform: &PlotTransform,
+    visible: &[&FilterOverlay],
+    axis: Axis,
+) {
+    let frame = *transform.frame();
+    let (floor, lane) = (frame.bottom(), frame.height() as f64 * LANE_FRACTION);
+    let x_at = |hz: f64| transform.position_from_point(&PlotPoint::new(hz, 0.0)).x;
+
+    // One scale across the whole lane, so a pinned stage reads as taller than
+    // a roaming one instead of every stage filling the lane to the brim.
+    let peak = visible
+        .iter()
+        .filter_map(|o| o.dwell.as_ref()?.get(axis))
+        .flat_map(|dwell| dwell.weight.iter().copied())
+        .fold(0.0, f64::max);
+
+    let painter = ui.painter().with_clip_rect(frame);
+    for overlay in visible {
+        let color = chain_color(palette, overlay.family.filter_loop());
+
+        match (
+            &overlay.shape,
+            overlay.dwell.as_ref().and_then(|d| d.get(axis)),
+        ) {
+            (_, Some(dwell)) if peak > 0.0 => {
+                for (low_hz, high_hz, height) in lane_bars(dwell, peak, lane) {
+                    painter.rect_filled(
+                        Rect::from_x_y_ranges(
+                            x_at(low_hz)..=x_at(high_hz),
+                            floor - height as f32..=floor,
+                        ),
+                        0.0,
+                        color.gamma_multiply_u8(LANE_ALPHA),
+                    );
+                }
+            }
+            // Bounds, with nothing logged to say where inside them the filter
+            // went. That is the same kind of claim as dwell — where it was
+            // allowed to be — so it belongs in the lane that means that, not
+            // as a span over the spectrum.
+            (&OverlayShape::Allowed { low_hz, high_hz }, _) => {
+                let y = floor - (lane * ALLOWED_HEIGHT) as f32;
+                painter.line_segment(
+                    [Pos2::new(x_at(low_hz), y), Pos2::new(x_at(high_hz), y)],
+                    Stroke::new(CHAIN_WIDTH, color),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One bar per visited bin, as `(low_hz, high_hz, height)` — scaled against the
+/// tallest dwell on the plot, and never taller than the lane.
+fn lane_bars(dwell: &Dwell, peak: f64, lane: f64) -> Vec<(f64, f64, f64)> {
+    let width = match dwell.freq_hz.as_slice() {
+        [first, second, ..] => second - first,
+        _ => 1.0,
+    };
+
+    dwell
+        .freq_hz
+        .iter()
+        .zip(&dwell.weight)
+        .filter(|&(_, &weight)| weight > 0.0)
+        .map(|(&hz, &weight)| (hz - width / 2.0, hz + width / 2.0, weight / peak * lane))
+        .collect()
 }
 
 /// One mark per peak, and a label on the loudest few. A peak the dynamic notch
@@ -970,11 +988,11 @@ mod test {
         let roaming = dwell(vec![0.25; 4]);
         let peak = 1.0;
 
-        let bars = |d: &Dwell| lane_bars(d, peak, 0.0, 10.0);
+        let bars = |d: &Dwell| lane_bars(d, peak, 10.0);
         let tallest = |d: &Dwell| {
             bars(d)
                 .iter()
-                .map(|b| b.value)
+                .map(|&(_, _, height)| height)
                 .fold(f64::NEG_INFINITY, f64::max)
         };
 
@@ -984,7 +1002,7 @@ mod test {
 
         // The lane is a strip of the plot: nothing in it reaches past its own
         // height, whatever the dwell did.
-        assert!(bars(&pinned).iter().all(|b| b.value <= 10.0));
+        assert!(bars(&pinned).iter().all(|&(_, _, height)| height <= 10.0));
     }
 
     /// A log with no dynamic stage has no lane at all, rather than an empty
@@ -994,7 +1012,7 @@ mod test {
         let static_stage = staged(OverlayFamily::Notch(FilterLoop::Gyro), vec![0.5]);
 
         assert!(static_stage.dwell.is_none());
-        assert_eq!(lane_bars(&dwell(vec![0.0, 0.0]), 1.0, 0.0, 10.0).len(), 0);
+        assert_eq!(lane_bars(&dwell(vec![0.0, 0.0]), 1.0, 10.0).len(), 0);
     }
 
     /// A synthetic flight with everything the overlays are built from: two
@@ -1116,6 +1134,38 @@ mod test {
                 egui::CentralPanel::default().show(ctx, |ui| panel.show(ui, &analysis));
             });
         }
+    }
+
+    /// The defect the lane is painted in screen space for: as bar charts its
+    /// bars were plot items, so they joined the bounds the plot fits itself to
+    /// — and a strip pinned to the bottom of those bounds re-sank the floor by
+    /// the plot's own margin on every frame. The spectrum shrank a little each
+    /// time the pointer moved.
+    #[test]
+    fn the_plot_settles_instead_of_growing_every_frame() {
+        let (fd, metadata) = flight();
+        let analysis = crate::analysis::GyroNoiseAnalyzer::default().analyze(&fd, &metadata);
+        let mut panel = Psd {
+            filtered_visible: PerAxis([true; 3]),
+            overlays: OverlayVisibility::all_on(),
+        };
+        let ctx = egui::Context::default();
+
+        let mut spans = Vec::new();
+        for _ in 0..6 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| panel.show(ui, &analysis));
+            });
+            let memory = egui_plot::PlotMemory::load(&ctx, Id::new(plot_id(Axis::Roll)))
+                .expect("the plot stored its bounds");
+            spans.push(memory.bounds().height());
+        }
+
+        let (settled, before) = (spans[5], spans[4]);
+        assert!(
+            (settled - before).abs() < 1e-6,
+            "the y range is still moving: {spans:?}"
+        );
     }
 
     /// A filter chain that leaves a peak louder than it found it says so,

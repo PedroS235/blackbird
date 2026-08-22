@@ -296,8 +296,12 @@ load, and storing it puts the feature behind the loader integration seam.
   taken over is **kept** and drawn as a filled histogram in a short lane along
   the plot floor, in the owning chain's hue: a pinned notch is a spike, a
   roaming one a plateau. One scale across the lane, so the two read
-  differently. The lane is sized from the plot's own bounds each frame, so it
-  holds its height under zoom. Time is a third variable on a plot whose two
+  differently. The lane is **painted in screen space after the plot**, from its
+  transform and clipped to its frame — as plot items its bars joined the bounds
+  the plot fits itself to, and a strip pinned to the bottom of those bounds
+  re-sank the floor by the plot's own 5% margin on every frame, so the spectrum
+  shrank a little each time the pointer moved. Painted, it has a true fixed
+  pixel height and holds it under zoom. Time is a third variable on a plot whose two
   axes are spent, and it gets its own strip of pixels — a curve faded by dwell
   reads as *uncertainty*, which is a different and wrong claim, and is
   indistinguishable from a curve that is merely shallow
@@ -652,6 +656,7 @@ _(none yet — project is in initial setup)_
 | Stage gains precomputed on the PSD's own grid, not resampled per frame | The fill's two edges then share x with the raw trace by construction, and the per-frame cost is ~513 multiplies per stage per axis. A null narrower than a bin is lost, which is honest: the spectrum cannot show attenuation finer than its own resolution either |
 | The removed energy is a fill with no dB threshold | Thickness is the signal, and an area is a quantity — which is what "what the chain removed" is. A cut-in at 3 dB invents a vertical edge, the same misread the harmonic spans were removed for |
 | A dynamic stage's label carries its realised p5–p95, not its configured range | `gyro_lpf1` is dynamic by default, and `Gyro LPF1` read as one soft static rolloff — the one thing it is not. The configured range is what the filter was allowed to do; the realised range is what it did, the same distinction the harmonic bands were narrowed to make |
+| The dwell lane is painted from the plot's transform, not added as plot items | A lane pinned to the bottom of auto-fitted bounds is a feedback loop: its bars widen the bounds, the bounds gain their relative margin, the floor sinks, and the spectrum shrinks on every repaint. A strip of the plot is not a series in the data, so it is painted like one |
 | The dwell histogram is kept and drawn in a floor lane | It was computed for every dynamic stage and thrown away, and it is the only thing that separates a notch pinned on one frequency from one roaming across a range — a distinction the weighted average exactly divides out. Time is a third variable and both axes are spent, so it gets its own strip; alpha on the curve would say "we are unsure", which is a different and wrong claim |
 | `OverlayShape::Band` dies: bounds move to the lane, the dynamic LPF gets an envelope | A span says "everything in here is gone", the precise misread the response curves were introduced to kill. Bounds are the same kind of claim as dwell — where the filter was *allowed* to be — so they belong in the lane that means that; two rolloffs at the configured extremes say "somewhere between these" in the plot's own language |
 | Two filter hues, one per loop, not one per stage | Which stage a curve is, is derivable from its corner and its order. Which loop it belongs to is not, and it is the one that changes the CLI line the pilot types |
