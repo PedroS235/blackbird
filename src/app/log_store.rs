@@ -269,8 +269,13 @@ mod test {
         assert!(store.resolve(key).is_some());
     }
 
+    /// The bound is a `debug_assert`: a mis-wired click is a caller bug worth
+    /// catching in development, and not worth killing a pilot's app over in
+    /// release, where the index is simply stored and `selected()` resolves to
+    /// `None`. So the panic exists only where the assertion does.
     #[test]
     #[should_panic]
+    #[cfg_attr(not(debug_assertions), ignore = "select's bound is a debug_assert")]
     fn select_out_of_range_panics() {
         let mut store = LogStore::default();
         store.select(0);

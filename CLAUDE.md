@@ -223,6 +223,16 @@ pub struct FilterDelayResult {
 - Formula: `amplitude_db = 20.0 * log10(magnitude)`
 - Input signal: `gyro_raw` (pre-filter gyro, not post-filter)
 - Analysed over `FlightData::trimmed(trim_s)`, not the whole log — see below
+- **Two curves on one plot share one dB reference.** A `Psd` is dB relative to
+  a level, and `SpectralView` hands out both halves of that: `peak_db()` is
+  this pass's loudest bin, `psd_relative_to(db)` normalises against someone
+  else's. The filtered gyro is normalised against the *raw* peak, never its
+  own — its own would lift it by exactly what the filters took off the loudest
+  bin, which is 10 dB on the pitch of a hover log and draws the filtered trace
+  above the raw one at frequencies no filter touches. Any second signal added
+  to that plot takes the same reference. `FrequencyPeak::attenuated_db` is the
+  difference of these two curves, so it is only the real attenuation while
+  they share a scale
 
 ### Filter overlay geometry
 
@@ -576,6 +586,7 @@ _(none yet — project is in initial setup)_
 | A harmonic is drawn as a recoloured stretch of the spectrum, not a band | Twelve spans were twenty-four vertical edges over the curve the pilot came to read, and a bracket says "boundary" where the question is "how loud". Recolouring the real curve makes every drawn point measured data, and leaves a peak no motor explains with no colour over it |
 | Harmonic bands are a percentile, not an extent | On any real freestyle log the full min..max runs idle to full song, so three orders of it overlap into a wash that covers most of the spectrum. Every peak lands inside one, so every peak looks motor-explained and the overlay says nothing |
 | Spectrogram harmonics are built per frame, not stored | The panel already holds the flight data, and the dynamic notch trace set the precedent. The series borrows eRPM as logged and carries a `scale` applied after decimation — min-max decimation commutes with a positive scale, so nothing is copied per frame |
+| Raw and filtered PSDs share the raw peak as their dB reference | Each normalised to its own peak is two scales on one plot, and the quieter curve is lifted by whatever the filters removed at the loudest bin — a hover log drew filtered 10 dB above raw on pitch. Roll and throttle-ramp logs hid it: their loudest bin survives filtering, so the two references happened to agree |
 | One colour module (`app/colors.rs`) for axes, compare slots and overlays | Axis colour is Betaflight red/green/blue in every single-log tab; slot colour exists only where comparison lives. Both must read the installed palette, so light mode is not drawn in dark-theme accents |
 | The harmonic mark's *hue and style together* live in `ui/harmonic_key.rs`, not `colors.rs` | `colors.rs` stays the palette — which hue is motor 3, in this theme. But a harmonic mark's identity is a hue *and* a line style, and a line style is not a colour: splitting the pair across two modules is exactly how the PSD's spans and the spectrogram's curves would come to disagree. `harmonic_key` asks `colors` for the hue and owns nothing else about the palette |
 | One `tracing` subscriber, `RUST_LOG`-overridable, crate-only by default | A bug report is a paste of this output. Dependencies logging per frame bury the parse and analysis lines it exists to show, and a pilot can still widen it without a rebuild |

@@ -186,7 +186,12 @@ impl GyroNoiseAnalyzer {
 
         let raw_psd = raw_view.psd();
         let raw_spectrum = raw_view.magnitude();
-        let filtered_psd = filtered_view.as_ref().map(|v| v.psd());
+        // Against the *raw* peak, not their own: the two curves are drawn on
+        // one plot, and a filtered curve normalised to itself is lifted by
+        // exactly what the filters took off the loudest bin.
+        let filtered_psd = filtered_view
+            .as_ref()
+            .map(|v| v.psd_relative_to(raw_view.peak_db()));
         let filtered_spectrum = filtered_view.as_ref().map(|v| v.magnitude());
 
         // Same order the references were registered in above.
@@ -336,6 +341,46 @@ mod test {
         assert!(peaks_near(0.0, 350.0), "untrimmed misses the ground tone");
         assert!(!peaks_near(2.0, 350.0), "the ground tone survived trimming");
         assert!(peaks_near(2.0, 200.0), "the flight tone was trimmed away");
+    }
+
+    /// Both curves are drawn on one plot, so both must be dB against the same
+    /// reference. Normalising each to its own peak lifts the filtered curve by
+    /// exactly what the filters took off the loudest bin — and a pilot reads
+    /// that as a filter that *added* noise at frequencies it never touched.
+    #[test]
+    fn the_filtered_psd_is_never_drawn_above_the_raw_one() {
+        const FS: f64 = 2000.0;
+        let n = 8192;
+        let tone = |hz: f64, amp: f64| {
+            move |i: usize| (std::f64::consts::TAU * hz * i as f64 / FS).sin() * amp
+        };
+        let (slow, fast) = (tone(20.0, 10.0), tone(200.0, 100.0));
+        let dt_us = (1e6 / FS) as u64;
+
+        // Raw is dominated by a 200 Hz peak the filters remove entirely;
+        // filtered keeps only the 20 Hz stick motion they pass.
+        let log = FlightData::default()
+            .with_time((0..n as u64).map(|i| 7_000_000 + i * dt_us).collect())
+            .with_channel(
+                Channel::RawGyro(Axis::Roll),
+                (0..n).map(|i| slow(i) + fast(i)).collect(),
+            )
+            .with_channel(Channel::Gyro(Axis::Roll), (0..n).map(slow).collect());
+
+        let roll = GyroNoiseAnalyzer::default()
+            .analyze(&log, &Metadata::default())
+            .axis(Axis::Roll)
+            .expect("roll analysed")
+            .clone();
+        let filtered = roll.filtered_psd.expect("filtered gyro analysed");
+
+        let worst = (0..roll.raw_psd.power_db.len())
+            .map(|k| filtered.power_db[k] - roll.raw_psd.power_db[k])
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            worst < 0.5,
+            "filtered sits {worst:.1} dB above raw — the two curves are on different scales"
+        );
     }
 
     #[test]
